@@ -74,7 +74,9 @@ function runSpawn(cmd, args, cwd) {
 
 function gitCommit(message, cwd) {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', ['commit', '-m', message], { cwd, env: process.env });
+    const safeMsg = (message || 'feat: 자동 작업').replace(/^\s+|\s+$/g, '') || 'feat: 자동 작업';
+    const escaped = safeMsg.replace(/["\\$`!]/g, '');
+    const proc = spawn('bash', ['-c', `git commit -m "${escaped}"`], { cwd, env: process.env });
     let stdout = '', stderr = '';
     proc.stdout.on('data', (d) => (stdout += d));
     proc.stderr.on('data', (d) => (stderr += d));
