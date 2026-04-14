@@ -57,11 +57,18 @@ function runSpawn(cmd, args, cwd) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args, { cwd, env: process.env });
     let stdout = '', stderr = '';
+    let settled = false;
     proc.stdout.on('data', (d) => (stdout += d));
     proc.stderr.on('data', (d) => (stderr += d));
-    proc.on('close', (code) =>
-      code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr || stdout))
-    );
+    proc.on('error', (err) => {
+      if (!settled) { settled = true; reject(err); }
+    });
+    proc.on('close', (code) => {
+      if (!settled) {
+        settled = true;
+        code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr || stdout));
+      }
+    });
   });
 }
 
@@ -143,7 +150,7 @@ ${diffContent.slice(0, 5000)}`;
 
   try {
     const msg = await runClaude(prompt, dir);
-    const cleaned = msg.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 80);
+    const cleaned = msg.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 50);
     if (cleaned) return cleaned;
   } catch {}
   return 'feat: 자동 작업';
@@ -163,7 +170,7 @@ async function generateTitle(prompt, result) {
 
   try {
     const raw = await runClaude(genPrompt, WORKSPACE);
-    const cleaned = raw.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 80);
+    const cleaned = raw.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
     if (cleaned) return cleaned;
   } catch {}
   return `feat: ${prompt.slice(0, 60)}`;
@@ -195,7 +202,7 @@ ${diffContent.slice(0, 8000)}
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
-  return { summary: prompt, changes: diffStat.split('\n').filter(l => l.trim()) };
+  return { summary: '변경사항 요약 생성 실패', changes: diffStat.split('\n').filter(l => l.trim()) };
 }
 
 // ─── PR 본문 생성 ───
@@ -437,9 +444,9 @@ async function doWork(projectName, prompt, message) {
 
   // PR 생성
   let prUrl = null;
+  const tmpPrBody = path.join(dir, '.pr-body.tmp');
   try {
     const prBody = buildPRBody(changeSummary.summary, changeSummary.changes, lastReview);
-    const tmpPrBody = path.join(dir, '.pr-body.tmp');
     fs.writeFileSync(tmpPrBody, prBody);
     prUrl = await runSpawn('gh', [
       'pr', 'create', '--repo', repoSlug,
@@ -448,26 +455,28 @@ async function doWork(projectName, prompt, message) {
       '--base', baseBranch,
       '--head', branch,
     ], dir);
-    fs.unlinkSync(tmpPrBody);
     await message.channel.send(`📋 PR: ${prUrl}`);
   } catch (prErr) {
     await message.channel.send(`⚠️ PR 생성 실패: ${prErr.message.slice(0, 500)}`);
+  } finally {
+    if (fs.existsSync(tmpPrBody)) fs.unlinkSync(tmpPrBody);
   }
 
   // 이슈 생성
+  const tmpIssueBody = path.join(dir, '.issue-body.tmp');
   try {
     const issueBody = buildIssueBody(changeSummary.summary, changeSummary.changes, prUrl);
-    const tmpIssueBody = path.join(dir, '.issue-body.tmp');
     fs.writeFileSync(tmpIssueBody, issueBody);
     const issueUrl = await runSpawn('gh', [
       'issue', 'create', '--repo', repoSlug,
       '--title', title,
       '--body-file', tmpIssueBody,
     ], dir);
-    fs.unlinkSync(tmpIssueBody);
     await message.channel.send(`📌 이슈: ${issueUrl}`);
   } catch (issueErr) {
     await message.channel.send(`⚠️ 이슈 생성 실패: ${issueErr.message.slice(0, 300)}`);
+  } finally {
+    if (fs.existsSync(tmpIssueBody)) fs.unlinkSync(tmpIssueBody);
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
