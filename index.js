@@ -53,6 +53,18 @@ function runCmd(cmd, cwd) {
   });
 }
 
+function gitCommit(message, cwd) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', ['commit', '-m', message], { cwd, env: process.env });
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', (d) => (stdout += d));
+    proc.stderr.on('data', (d) => (stderr += d));
+    proc.on('close', (code) =>
+      code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr || stdout))
+    );
+  });
+}
+
 function runClaude(prompt, cwd) {
   return new Promise((resolve, reject) => {
     const proc = spawn('claude', [
@@ -116,7 +128,8 @@ ${diffContent.slice(0, 5000)}`;
   try {
     const msg = await runClaude(prompt, dir);
     // 첫 줄만, 따옴표 제거
-    return msg.split('\n')[0].replace(/^["']|["']$/g, '').slice(0, 80);
+    const cleaned = msg.split('\n')[0].replace(/^["']|["']$/g, '').trim().slice(0, 80);
+    if (cleaned) return cleaned;
   } catch {}
   return 'feat: 자동 작업';
 }
@@ -256,7 +269,7 @@ ${reviewText}
   if (status) {
     await runCmd('git add -A', dir);
     const fixMsg = await generateCommitMsg(dir);
-    await runCmd(`git commit -m "${fixMsg.replace(/"/g, '\\"')}"`, dir);
+    await gitCommit(fixMsg, dir);
     await channel.send('✅ 수정 커밋 완료');
   }
 
@@ -301,7 +314,7 @@ async function doWork(projectName, prompt, message) {
   // 커밋 (Claude가 메시지 생성)
   await runCmd('git add -A', dir);
   const commitMsg = await generateCommitMsg(dir);
-  await runCmd(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, dir);
+  await gitCommit(commitMsg, dir);
 
   // 리뷰 루프
   let reviewPassed = false;
@@ -592,7 +605,7 @@ client.on('messageCreate', async (message) => {
       if (status) {
         await runCmd('git add -A', dir);
         const fixCommitMsg = await generateCommitMsg(dir);
-        await runCmd(`git commit -m "${fixCommitMsg.replace(/"/g, '\\"')}"`, dir);
+        await gitCommit(fixCommitMsg, dir);
         await runCmd(`git push origin ${currentBranch}`, dir);
         await message.channel.send('✅ 수정 푸시 완료');
       }
