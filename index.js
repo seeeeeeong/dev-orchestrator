@@ -103,6 +103,23 @@ async function ensureRepo(name) {
   return dir;
 }
 
+// ─── Claude로 커밋 메시지 생성 ───
+async function generateCommitMsg(dir) {
+  const diff = await runCmd('git diff --cached --stat', dir);
+  const diffContent = await runCmd('git diff --cached', dir);
+  const prompt = `다음 git diff를 보고 커밋 메시지를 한 줄로 작성해줘.
+Conventional Commits 형식 (feat:, fix:, refactor:, chore: 등). 한국어. 50자 이내. 메시지만 출력해.
+
+${diffContent.slice(0, 5000)}`;
+
+  try {
+    const msg = await runClaude(prompt, dir);
+    // 첫 줄만, 따옴표 제거
+    return msg.split('\n')[0].replace(/^["']|["']$/g, '').slice(0, 80);
+  } catch {}
+  return 'feat: 자동 작업';
+}
+
 // ─── Claude로 제목/본문 생성 ───
 async function generateTitles(prompt, result, review, type) {
   const genPrompt = `다음 작업 정보를 바탕으로 GitHub ${type} 제목과 본문을 생성해줘. JSON으로만 응답해.
@@ -214,7 +231,8 @@ ${reviewText}
   const status = await runCmd('git status --porcelain', dir);
   if (status) {
     await runCmd('git add -A', dir);
-    await runCmd('git commit -m "fix: 리뷰 피드백 반영"', dir);
+    const fixMsg = await generateCommitMsg(dir);
+    await runCmd(`git commit -m "${fixMsg.replace(/"/g, '\\"')}"`, dir);
     await channel.send('✅ 수정 커밋 완료');
   }
 
@@ -256,9 +274,10 @@ async function doWork(projectName, prompt, message) {
     return { changed: false };
   }
 
-  // 커밋
+  // 커밋 (Claude가 메시지 생성)
   await runCmd('git add -A', dir);
-  await runCmd(`git commit -m "feat: ${prompt.slice(0, 72).replace(/"/g, '\\"')}"`, dir);
+  const commitMsg = await generateCommitMsg(dir);
+  await runCmd(`git commit -m "${commitMsg.replace(/"/g, '\\"')}"`, dir);
 
   // 리뷰 루프
   let reviewPassed = false;
@@ -548,7 +567,8 @@ client.on('messageCreate', async (message) => {
       const status = await runCmd('git status --porcelain', dir);
       if (status) {
         await runCmd('git add -A', dir);
-        await runCmd(`git commit -m "fix: ${cmd.prompt.slice(0, 50).replace(/"/g, '\\"')}"`, dir);
+        const fixCommitMsg = await generateCommitMsg(dir);
+        await runCmd(`git commit -m "${fixCommitMsg.replace(/"/g, '\\"')}"`, dir);
         await runCmd(`git push origin ${currentBranch}`, dir);
         await message.channel.send('✅ 수정 푸시 완료');
       }
