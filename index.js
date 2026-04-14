@@ -197,7 +197,7 @@ ${claudeMd ? `## 프로젝트 컨벤션\n${claudeMd}\n` : ''}
 반드시 하나로 명시: 승인(LGTM) / 수정 필요 / 반려`;
 
   const response = await openai.responses.create({
-    model: 'o3',
+    model: 'gpt-5.4',
     instructions: systemPrompt,
     input: `다음 코드 변경사항을 리뷰해줘:\n\n\`\`\`diff\n${diff.slice(0, 80000)}\n\`\`\``,
     reasoning: { effort: 'high' },
@@ -217,7 +217,7 @@ function isLGTM(review) {
 }
 
 async function reviewCode(dir, branch, baseBranch, channel) {
-  await channel.send('🔍 GPT o3 (high reasoning) 리뷰 시작...');
+  await channel.send('🔍 GPT-5.4 (high reasoning) 리뷰 시작...');
 
   const diff = await runCmd(`git diff ${baseBranch}...${branch}`, dir);
   if (!diff) {
