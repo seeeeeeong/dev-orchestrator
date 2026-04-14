@@ -41,6 +41,10 @@ const client = new Client({
 let working = false;
 
 // ─── 유틸 ───
+function shellEscape(s) {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
 function runCmd(cmd, cwd) {
   return new Promise((resolve, reject) => {
     const proc = spawn('bash', ['-c', cmd], { cwd, env: process.env });
@@ -354,7 +358,7 @@ async function doWork(projectName, prompt, message) {
     const tmpPrBody = path.join(dir, '.pr-body.tmp');
     fs.writeFileSync(tmpPrBody, pr.body);
     prUrl = await runCmd(
-      `gh pr create --repo ${repoSlug} --title "${pr.title.replace(/"/g, '\\"')}" --body-file "${tmpPrBody}" --base ${baseBranch} --head ${branch}`,
+      `gh pr create --repo ${repoSlug} --title ${shellEscape(pr.title)} --body-file ${shellEscape(tmpPrBody)} --base ${baseBranch} --head ${branch}`,
       dir
     );
     fs.unlinkSync(tmpPrBody);
@@ -370,7 +374,7 @@ async function doWork(projectName, prompt, message) {
     const tmpIssueBody = path.join(dir, '.issue-body.tmp');
     fs.writeFileSync(tmpIssueBody, issue.body);
     const issueUrl = await runCmd(
-      `gh issue create --repo ${repoSlug} --title "${issue.title.replace(/"/g, '\\"')}" --body-file "${tmpIssueBody}"`,
+      `gh issue create --repo ${repoSlug} --title ${shellEscape(issue.title)} --body-file ${shellEscape(tmpIssueBody)}`,
       dir
     );
     fs.unlinkSync(tmpIssueBody);
@@ -557,7 +561,7 @@ client.on('messageCreate', async (message) => {
       const repoSlug = PROJECTS[cmd.project].repo.replace('https://github.com/', '').replace('.git', '');
       try {
         const issueUrl = await runCmd(
-          `gh issue create --repo ${repoSlug} --title "${title.trim().replace(/"/g, '\\"')}" --body "${body.replace(/"/g, '\\"')}"`,
+          `gh issue create --repo ${repoSlug} --title ${shellEscape(title.trim())} --body ${shellEscape(body)}`,
           dir
         );
         await message.reply(`📌 이슈: ${issueUrl}`);
