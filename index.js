@@ -3,6 +3,7 @@ const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const OpenAI = require('openai');
 
 // ─── 설정 ───
 const WORKSPACE = path.join(__dirname, 'repos');
@@ -153,43 +154,22 @@ async function generateTitles(prompt, result, review, type) {
   };
 }
 
-// ─── 리뷰 기능 ───
-function isLGTM(review) {
-  if (!review) return true;
-  const lower = review.toLowerCase();
-  if (lower.includes('반려')) return false;
-  if (lower.includes('심각도: 높음') || lower.includes('[높음]')) return false;
-  if (lower.includes('심각도: 중간') || lower.includes('[중간]')) return false;
-  return true;
-}
+// ─── GPT-5.4 리뷰 ───
+async function reviewWithGPT(diff, claudeMd) {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-async function reviewCode(dir, branch, baseBranch, channel) {
-  await channel.send('🔍 리뷰 시작 (프로젝트 전체 맥락 분석)...');
+  const systemPrompt = `너는 시니어 백엔드 개발자이고 코드 리뷰어다. 주어진 git diff를 리뷰해줘.
 
-  const statusCheck = await runCmd(`git diff --stat ${baseBranch}...${branch}`, dir);
-  if (!statusCheck) {
-    await channel.send('리뷰할 변경사항이 없습니다.');
-    return { review: null, passed: true };
-  }
+${claudeMd ? `## 프로젝트 컨벤션\n${claudeMd}\n` : ''}
 
-  // Claude가 프로젝트 안에서 직접 파일을 읽고 리뷰
-  const reviewPrompt = `코드 리뷰를 수행해줘. 코드를 수정하지 마.
-
-## 리뷰 방법
-1. git diff ${baseBranch}...${branch} 로 변경된 파일 확인
-2. 변경된 파일의 전체 내용을 읽어서 맥락 파악
-3. CLAUDE.md가 있으면 읽어서 프로젝트 컨벤션 확인
-4. 관련된 다른 파일도 필요하면 읽어서 전체 구조 이해
-5. 이 맥락을 바탕으로 리뷰
-
-## 심각도 기준 (엄격하게 지켜)
-- **높음**: 런타임 에러, 데이터 손실, 보안 취약점 — 실제로 장애가 나는 것만
-- **중간**: 확실한 성능 문제 (N+1 쿼리 등), 확실한 로직 버그
-- **낮음**: 컨벤션, 네이밍, 스타일, 개선 제안, 추측성 이슈
+## 심각도 기준
+- **[높음]**: 런타임 에러, 데이터 손실, 보안 취약점 — 실제 장애가 나는 것만
+- **[중간]**: 확실한 성능 문제 (N+1 쿼리 등), 확실한 로직 버그
+- **[낮음]**: 컨벤션, 네이밍, 스타일, 개선 제안, 추측성 이슈
 
 ## 중요 규칙
+- diff가 잘려 있는 것은 이슈가 아니다
 - "~할 수 있음", "~가능성" 같은 추측은 낮음
-- 동작하는 코드의 스타일 지적은 낮음
 - 높음/중간은 확실한 문제만. 애매하면 낮음
 
 ## 출력 형식
@@ -216,7 +196,43 @@ async function reviewCode(dir, branch, baseBranch, channel) {
 
 반드시 하나로 명시: 승인(LGTM) / 수정 필요 / 반려`;
 
-  const review = await runClaude(reviewPrompt, dir);
+  const response = await openai.responses.create({
+    model: 'o3',
+    instructions: systemPrompt,
+    input: `다음 코드 변경사항을 리뷰해줘:\n\n\`\`\`diff\n${diff.slice(0, 80000)}\n\`\`\``,
+    reasoning: { effort: 'high' },
+  });
+
+  return response.output_text;
+}
+
+// ─── 리뷰 기능 ───
+function isLGTM(review) {
+  if (!review) return true;
+  const lower = review.toLowerCase();
+  if (lower.includes('반려')) return false;
+  if (lower.includes('심각도: 높음') || lower.includes('[높음]')) return false;
+  if (lower.includes('심각도: 중간') || lower.includes('[중간]')) return false;
+  return true;
+}
+
+async function reviewCode(dir, branch, baseBranch, channel) {
+  await channel.send('🔍 GPT o3 (high reasoning) 리뷰 시작...');
+
+  const diff = await runCmd(`git diff ${baseBranch}...${branch}`, dir);
+  if (!diff) {
+    await channel.send('리뷰할 변경사항이 없습니다.');
+    return { review: null, passed: true };
+  }
+
+  // CLAUDE.md 읽기 (프로젝트 컨벤션)
+  let claudeMd = '';
+  const claudeMdPath = path.join(dir, 'CLAUDE.md');
+  if (fs.existsSync(claudeMdPath)) {
+    claudeMd = fs.readFileSync(claudeMdPath, 'utf-8');
+  }
+
+  const review = await reviewWithGPT(diff, claudeMd);
   const passed = isLGTM(review);
   return { review, passed };
 }
