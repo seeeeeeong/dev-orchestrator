@@ -173,13 +173,18 @@ async function generateTitle(prompt, result) {
     const cleaned = raw.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
     if (cleaned) return cleaned;
   } catch {}
-  return `feat: ${prompt.slice(0, 60)}`;
+  return prompt.slice(0, 60);
 }
 
 // ─── 변경 파일 요약 생성 ───
 async function generateChangeSummary(dir, baseBranch, branch) {
-  const diffStat = await runCmd(`git diff --stat ${baseBranch}...${branch}`, dir);
-  const diffContent = await runCmd(`git diff ${baseBranch}...${branch}`, dir);
+  let diffStat, diffContent;
+  try {
+    diffStat = await runCmd(`git diff --stat ${baseBranch}...${branch}`, dir);
+    diffContent = await runCmd(`git diff ${baseBranch}...${branch}`, dir);
+  } catch {
+    return { summary: '변경사항 요약 생성 실패 (diff 실행 오류)', changes: [] };
+  }
 
   const genPrompt = `아래 diff를 분석하고 JSON으로만 응답해.
 
@@ -213,8 +218,15 @@ function buildPRBody(summary, changes, review) {
 
   let reviewSection = '';
   if (review) {
-    const conclusion = review.includes('승인') || review.toLowerCase().includes('lgtm')
-      ? '✅ 승인 (LGTM)' : '⚠️ 수정 필요';
+    const lower = review.toLowerCase();
+    let conclusion;
+    if (lower.includes('반려')) {
+      conclusion = '❌ 반려';
+    } else if (lower.includes('승인') || lower.includes('lgtm')) {
+      conclusion = '✅ 승인 (LGTM)';
+    } else {
+      conclusion = '⚠️ 수정 필요';
+    }
     reviewSection = `## Review\n\n**결과:** ${conclusion}\n`;
   }
 
