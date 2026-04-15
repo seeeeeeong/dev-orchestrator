@@ -109,9 +109,17 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
 
     let stdout = '';
     proc.stdout.on('data', (d) => (stdout += d));
-    // stderr는 무시 — Claude CLI 내부 도구 실행 에러가 결과에 섞이는 것을 방지
     proc.stderr.on('data', () => {});
-    proc.on('close', () => resolve(cleanOutput(stdout.trim())));
+    proc.on('close', (code) => {
+      const output = cleanOutput(stdout.trim());
+      if (output) {
+        resolve(output);
+      } else if (code !== 0 && code !== null) {
+        reject(new Error(`Claude CLI exited with code ${code}`));
+      } else {
+        resolve('');
+      }
+    });
     proc.on('error', reject);
   });
 }
@@ -362,9 +370,11 @@ async function ensureRepo(name) {
   return dir;
 }
 
-// ─── Claude로 커밋 메시지 생성 ───
+// ─── OpenAI로 커밋 메시지 생성 (Claude CLI의 bash tool 실행 문제 방지) ───
 async function generateCommitMsg(dir, taskDescription, issueNumber) {
   const diffContent = await runCmd('git diff --cached', dir);
+  if (!diffContent.trim()) return 'chore: 자동 작업';
+
   const prompt = `다음 규칙으로 git 커밋 메시지를 작성해.
 
 ## 규칙
@@ -383,39 +393,26 @@ ${issueNumber || '없음'}
 ## staged 변경사항
 ${diffContent.slice(0, 5000)}
 
-## 출력 형식
-\`\`\`commit
-[여기에 커밋 메시지만]
-\`\`\`
-
-커밋 메시지 외 다른 텍스트 출력 금지.`;
+커밋 메시지만 출력해. 따옴표, 백틱, 설명 없이 커밋 메시지 텍스트만.`;
 
   try {
-    const msg = await runClaude(prompt, dir, { skipPrefix: true });
-    // ```commit 블록에서 추출 (닫는 ``` 뒤 줄바꿈 없는 경우도 매칭)
-    const commitBlockMatch = msg.match(/```commit\n([\s\S]+?)```/);
-    if (commitBlockMatch) {
-      const extracted = commitBlockMatch[1].trim();
-      if (extracted) return extracted;
-    }
-    // 일반 ``` 블록에서 추출
-    const codeBlockMatch = msg.match(/```\n([\s\S]+?)```/);
-    if (codeBlockMatch) {
-      const extracted = codeBlockMatch[1].trim();
-      if (extracted) return extracted;
-    }
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: prompt,
+    });
+    const msg = (response.output_text || '').trim();
     // Conventional Commits 패턴 직접 매칭
     const conventionalMatch = msg.match(/^(feat|fix|refactor|test|docs|chore|perf|style)(\(.+?\))?:\s*.+/m);
     if (conventionalMatch) return conventionalMatch[0].trim().slice(0, 72);
-    // 첫 줄 폴백 (따옴표, 백틱, 에러 메시지 제거)
-    const lines = msg.split('\n').filter(l => !l.startsWith('bash:') && !l.startsWith('Warning'));
-    const firstLine = (lines[0] || '').replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72);
+    // 첫 줄 폴백
+    const firstLine = msg.split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72);
     if (firstLine) return firstLine;
   } catch {}
   return 'feat: 자동 작업';
 }
 
-// ─── Claude로 제목 생성 ───
+// ─── OpenAI로 제목 생성 ───
 async function generateTitle(prompt, result) {
   const genPrompt = `아래 작업 정보를 보고 GitHub 제목을 생성해. 제목 텍스트만 출력해.
 
@@ -428,8 +425,12 @@ async function generateTitle(prompt, result) {
 작업 결과: ${(result || '').slice(0, 2000)}`;
 
   try {
-    const raw = await runClaude(genPrompt, WORKSPACE, { skipPrefix: true });
-    const cleaned = raw.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: genPrompt,
+    });
+    const cleaned = (response.output_text || '').split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
     if (cleaned) return cleaned;
   } catch {}
   return prompt.slice(0, 60);
@@ -462,7 +463,12 @@ ${diffContent.slice(0, 8000)}
 {"summary": "...", "changes": ["index.js: 커밋 메시지 생성 로직 개선", ...]}`;
 
   try {
-    const raw = await runClaude(genPrompt, WORKSPACE, { skipPrefix: true });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: genPrompt,
+    });
+    const raw = (response.output_text || '').trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
@@ -502,7 +508,12 @@ ${issueNumber ? `Closes #${issueNumber}` : '없음'}
 
   let draft;
   try {
-    draft = await runClaude(draftPrompt, dir, { skipPrefix: true });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: draftPrompt,
+    });
+    draft = (response.output_text || '').trim();
   } catch {
     // 폴백: 기존 방식으로 생성
     const changesSection = Array.isArray(changeSummary.changes)
@@ -532,7 +543,12 @@ ${issueNumber ? `Closes #${issueNumber}` : '없음'}
 async function generateIssueBody(taskDescription, projectName, changeSummary, prUrl, dir) {
   try {
     const issuePrompt = buildIssueBodyPrompt(taskDescription, projectName);
-    let body = await runClaude(issuePrompt, dir, { skipPrefix: true });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const issueResp = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: issuePrompt,
+    });
+    let body = (issueResp.output_text || '').trim();
 
     if (prUrl) {
       body += `\n\n## Related PR\n\n${prUrl}`;
@@ -710,7 +726,6 @@ async function doWork(projectName, prompt, message) {
 
   if (!reviewPassed) {
     await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
-    await cleanupBranch(dir, branch, baseBranch);
     return { changed: true, pushed: false };
   }
 
@@ -822,7 +837,12 @@ async function parseNaturalLanguage(text) {
 메시지: ${text}`;
 
   try {
-    const result = await runClaude(prompt, WORKSPACE, { skipPrefix: true });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const nlResp = await openai.responses.create({
+      model: 'gpt-4.1-mini',
+      input: prompt,
+    });
+    const result = (nlResp.output_text || '').trim();
     const jsonMatch = result.match(/\{[\s\S]*?\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
@@ -947,7 +967,12 @@ client.on('messageCreate', async (message) => {
       await message.reply(`📝 **${cmd.project}** 이슈 본문 생성 중...`);
       let body;
       try {
-        body = await runClaude(buildIssueBodyPrompt(description, cmd.project), dir, { skipPrefix: true });
+        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        const issueResp = await openai.responses.create({
+          model: 'gpt-4.1-mini',
+          input: buildIssueBodyPrompt(description, cmd.project),
+        });
+        body = (issueResp.output_text || '').trim();
       } catch {
         body = description;
       }
@@ -1022,7 +1047,9 @@ client.on('messageCreate', async (message) => {
     try {
       const errDir = path.join(WORKSPACE, cmd.project);
       const cur = await runCmd('git branch --show-current', errDir);
-      if (cur.startsWith('claude/')) await cleanupBranch(errDir, cur, baseBranch);
+      if (cur.startsWith('claude/') && baseBranch) {
+        try { await runCmd(`git checkout -f ${baseBranch}`, errDir); } catch {}
+      }
     } catch {}
   } finally {
     working = false;
