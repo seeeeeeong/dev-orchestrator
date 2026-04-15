@@ -127,10 +127,10 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
         return;
       }
       const output = cleanOutput(stdout.trim());
-      if (output) {
+      if (code !== 0 && code !== null) {
+        reject(new Error(`Claude CLI exited with code ${code}${output ? `\n${output.slice(0, 500)}` : ''}`));
+      } else if (output) {
         resolve(output);
-      } else if (code !== 0 && code !== null) {
-        reject(new Error(`Claude CLI exited with code ${code}`));
       } else {
         resolve('');
       }
@@ -376,7 +376,7 @@ async function ensureRepo(name) {
     try {
       const branches = await runCmd('git branch --list claude/*', dir);
       if (branches) {
-        for (const b of branches.split('\n').map(s => s.trim()).filter(Boolean)) {
+        for (const b of branches.split('\n').map(s => s.replace(/^\*\s*/, '').trim()).filter(Boolean)) {
           try { await runCmd(`git branch -d ${b}`, dir); } catch {}
         }
       }
@@ -435,8 +435,8 @@ async function generateTitle(prompt, result) {
 작업 결과: ${(result || '').slice(0, 2000)}`;
 
   try {
-    const result = await runOpenAIText(genPrompt);
-    const cleaned = result.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
+    const titleText = await runOpenAIText(genPrompt);
+    const cleaned = titleText.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
     if (cleaned) return cleaned;
   } catch {}
   return prompt.slice(0, 60);
