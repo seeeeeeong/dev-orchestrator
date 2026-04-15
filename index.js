@@ -731,8 +731,7 @@ async function doWork(projectName, prompt, message) {
   }
 
   if (!reviewPassed) {
-    await cleanupBranch(dir, branch, baseBranch);
-    await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
+    await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n브랜치 \`${branch}\`에 작업 내용이 남아 있습니다.\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
     return { changed: true, pushed: false };
   }
 
@@ -1045,7 +1044,7 @@ client.on('messageCreate', async (message) => {
     try {
       const errDir = path.join(WORKSPACE, cmd.project);
       const cur = await runCmd('git branch --show-current', errDir);
-      if (cur.startsWith('claude/')) await runSpawn('git', ['checkout', '-f', baseBranch], errDir);
+      if (cur.startsWith('claude/') && baseBranch) await runSpawn('git', ['checkout', '-f', baseBranch], errDir);
     } catch {}
   } finally {
     working = false;
