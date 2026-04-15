@@ -7,7 +7,7 @@ const OpenAI = require('openai');
 
 // ─── 설정 ───
 const WORKSPACE = path.join(__dirname, 'repos');
-const MAX_REVIEW_RETRIES = 5;
+const MAX_REVIEW_RETRIES = 3;
 const PROJECTS = {
   'blog-api': {
     repo: 'https://github.com/seeeeeeong/blog-api.git',
@@ -607,6 +607,30 @@ async function autoFix(dir, reviewText, channel, taskDescription, reviewHistory,
   return result;
 }
 
+// ─── 브랜치 정리 (실패 시 로컬/원격 완전 삭제) ───
+async function cleanupBranch(dir, branch, baseBranch) {
+  try {
+    await runCmd(`git checkout ${baseBranch}`, dir);
+  } catch {}
+  try {
+    await runSpawn('git', ['branch', '-D', branch], dir);
+  } catch {}
+  try {
+    await runSpawn('git', ['push', 'origin', '--delete', branch], dir);
+  } catch {}
+}
+
+// ─── PR 전 커밋 squash ───
+async function squashBranchCommits(dir, branch, baseBranch) {
+  const commitCount = await runCmd(`git rev-list --count ${baseBranch}..${branch}`, dir);
+  if (parseInt(commitCount, 10) <= 1) return;
+
+  const mergeBase = await runCmd(`git merge-base ${baseBranch} ${branch}`, dir);
+  await runCmd(`git reset --soft ${mergeBase}`, dir);
+  const firstMsg = await runCmd(`git log ${mergeBase}..HEAD@{1} --format=%s -1`, dir);
+  await gitCommit(firstMsg || 'feat: 자동 작업', dir);
+}
+
 // ─── 이슈 번호 추출 ───
 function extractIssueNumber(prompt) {
   const match = prompt.match(/(?:이슈|issue|#)\s*:?\s*#?(\d+)/i);
@@ -690,11 +714,14 @@ async function doWork(projectName, prompt, message) {
   }
 
   if (!reviewPassed) {
-    await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
+    await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 브랜치 정리 후 중단`);
+    await cleanupBranch(dir, branch, baseBranch);
+    await message.channel.send('🗑️ 실패 브랜치 삭제 완료');
     return { changed: true, pushed: false };
   }
 
-  // 푸시
+  // squash 후 푸시
+  await squashBranchCommits(dir, branch, baseBranch);
   await runCmd(`git push origin ${branch}`, dir);
 
   // 제목 + 변경사항 요약 생성
