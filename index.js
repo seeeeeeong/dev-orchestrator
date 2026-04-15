@@ -5,12 +5,12 @@ const path = require('path');
 const fs = require('fs');
 const OpenAI = require('openai');
 
-// ─── 설정 ───
+// ─── Configuration ───
 const WORKSPACE = path.join(__dirname, 'repos');
 const MAX_REVIEW_RETRIES = 3;
 const OPENAI_MODEL = 'gpt-4.1-mini';
 
-// ─── OpenAI 텍스트 생성 공통 헬퍼 ───
+// ─── Shared OpenAI text helper ───
 async function runOpenAIText(prompt) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const response = await openai.responses.create({
@@ -49,12 +49,12 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
 });
 
-// ─── working 플래그 (파일 기반 — 봇 재시작 시에도 유지) ───
+// ─── Working flag (file-based and survives bot restarts) ───
 const LOCK_FILE = path.join(__dirname, '.working.lock');
 
 function isWorking() {
   if (!fs.existsSync(LOCK_FILE)) return false;
-  // 1시간 이상 된 lock은 stale로 판단 (이전 크래시 잔해)
+  // Treat locks older than 1 hour as stale from a previous crash.
   const stat = fs.statSync(LOCK_FILE);
   if (Date.now() - stat.mtimeMs > 60 * 60 * 1000) {
     fs.unlinkSync(LOCK_FILE);
@@ -67,7 +67,7 @@ function setWorking(v) {
   else if (fs.existsSync(LOCK_FILE)) fs.unlinkSync(LOCK_FILE);
 }
 
-// ─── 유틸 ───
+// ─── Utilities ───
 function runCmd(cmd, cwd) {
   return new Promise((resolve, reject) => {
     const proc = spawn('bash', ['-c', cmd], { cwd, env: process.env });
@@ -102,7 +102,7 @@ function runSpawn(cmd, args, cwd) {
 function gitCommit(message, cwd) {
   return new Promise((resolve, reject) => {
     const raw = typeof message === 'string' ? message : '';
-    const safeMsg = raw.trim() || 'feat: 자동 작업';
+    const safeMsg = raw.trim() || 'feat: automated update';
     const proc = spawn('git', ['commit', '-m', safeMsg], { cwd, env: process.env });
     let stdout = '', stderr = '';
     proc.stdout.on('data', (d) => (stdout += d));
@@ -113,7 +113,7 @@ function gitCommit(message, cwd) {
   });
 }
 
-// ─── Claude CLI (JSON 출력 + 세션 연속성) ───
+// ─── Claude CLI (JSON output with session continuity) ───
 function runClaude(prompt, cwd, { sessionId = null } = {}) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -152,7 +152,7 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
           });
         }
       } catch {
-        // JSON 파싱 실패 시 plain text 폴백
+        // Fall back to plain text if JSON parsing fails.
         if (code !== 0 && code !== null) {
           const errMsg = stderr.trim().slice(0, 500);
           reject(new Error(`Claude CLI exited with code ${code}${cleaned ? `\n${cleaned.slice(0, 500)}` : ''}${errMsg ? `\nstderr: ${errMsg}` : ''}`));
@@ -165,7 +165,7 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
   });
 }
 
-// Warning 메시지 제거
+// Strip warning messages from Claude CLI output.
 function cleanOutput(text) {
   return text
     .replace(/Warning: no stdin data received.*\n?/g, '')
@@ -173,7 +173,7 @@ function cleanOutput(text) {
     .trim();
 }
 
-// ─── 프로젝트 설정 확인 ───
+// ─── Project setup check ───
 function checkProjectSetup(projectPath, projectName) {
   const claudeMdPath = path.join(projectPath, 'CLAUDE.md');
   const skillsPath = path.join(projectPath, '.claude', 'skills');
@@ -190,22 +190,22 @@ function checkProjectSetup(projectPath, projectName) {
   return null;
 }
 
-// ─── Claude 응답에서 구조화된 JSON 추출 ───
+// ─── Extract structured JSON from Claude output ───
 function parseWorkOutput(text, fallbackPrompt) {
   const defaults = {
-    summary: '자동 작업 완료',
-    commit_message: 'feat: 자동 작업',
+    summary: 'Automated work completed.',
+    commit_message: 'feat: automated update',
     pr_title: (fallbackPrompt || '').slice(0, 60),
     files_changed: [],
   };
 
   try {
-    // ```json ... ``` 블록 먼저 시도
+    // Try a fenced ```json ... ``` block first.
     const fencedMatch = text.match(/```json\s*([\s\S]*?)```/);
     if (fencedMatch) {
       return { ...defaults, ...JSON.parse(fencedMatch[1].trim()) };
     }
-    // 날것의 JSON 객체 시도
+    // Then try a raw JSON object.
     const rawMatch = text.match(/\{[\s\S]*"summary"[\s\S]*?"commit_message"[\s\S]*?\}/);
     if (rawMatch) {
       return { ...defaults, ...JSON.parse(rawMatch[0]) };
@@ -215,53 +215,53 @@ function parseWorkOutput(text, fallbackPrompt) {
   return defaults;
 }
 
-// ─── 프롬프트 빌더 ───
+// ─── Prompt builders ───
 
 function buildPlanPrompt(taskDescription, issueNumber, projectInfo) {
   return `
-# 작업 계획 수립
+# Build an Implementation Plan
 
 ## Task
 ${taskDescription}
 ${issueNumber ? `\n## Issue: #${issueNumber}` : ''}
 
-## 지침
-- 코드를 수정하지 마. 계획만 세워.
-- 관련 디렉토리 구조와 기존 코드를 먼저 파악해.
-- 아래 항목을 정리해:
+## Instructions
+- Do not edit code yet. Produce a plan only.
+- Inspect the relevant directory structure and existing code first.
+- Cover the items below:
 
-1. **변경 대상 파일** — 수정/생성할 파일 목록과 이유
-2. **구현 순서** — 어떤 순서로 작업할지
-3. **기존 패턴** — 이 프로젝트에서 이미 쓰고 있는 패턴 중 따라야 할 것
-4. **리스크** — 주의할 점, 깨질 수 있는 부분
-5. **테스트 전략** — 어떤 테스트를 추가/수정할지
+1. **Target files** - Files to modify or create, and why
+2. **Implementation order** - Recommended execution sequence
+3. **Existing patterns** - Patterns already used in this project that should be followed
+4. **Risks** - Things that may break or require care
+5. **Test strategy** - Tests to add or update
 
-## 금지
-- 실제 코드 수정
-- 새 패턴 도입 제안 (기존 패턴만 사용)
+## Do Not
+- Modify code
+- Propose a brand-new pattern when an existing one already fits
 `.trim();
 }
 
 function buildExecPrompt(issueNumber) {
   return `
-위 계획대로 구현해.
+Implement the work according to the approved plan.
 
-## 구현 규칙
-- 기존 코드 패턴과 동일하게 구현
-- 새 의존성 추가 금지 (필요하면 summary에 이유 명시)
-- 변경 파일 최소화 — 관련 없는 파일 수정 금지
-- 리팩토링과 기능 추가를 같은 변경에 섞지 말 것
-- 테스트 작성 후 빌드/테스트 통과 확인
+## Implementation Rules
+- Follow the existing code patterns in this project
+- Do not add new dependencies unless absolutely necessary. If you do, explain why in "summary"
+- Keep the file set minimal and avoid unrelated edits
+- Do not mix refactoring and feature work unless the refactor is directly required
+- Add or update tests, then verify build and test results
 
-## 완료 후 출력
-반드시 아래 JSON 형식으로 작업 결과를 출력해:
+## Output
+Return the final result in the exact JSON format below:
 
 \`\`\`json
 {
-  "summary": "무엇을 왜 구현했는지 한국어 2~3문장",
-  "commit_message": "type(scope): 제목 (conventional commits, 72자 이내)${issueNumber ? `\\n\\nCloses #${issueNumber}` : ''}",
-  "pr_title": "type: 한국어 제목 (60자 이내)",
-  "files_changed": ["변경된 파일 경로 목록"]
+  "summary": "2-3 concise English sentences explaining what changed and why",
+  "commit_message": "type(scope): concise English title (Conventional Commits, <= 72 chars)${issueNumber ? `\\n\\nCloses #${issueNumber}` : ''}",
+  "pr_title": "type(scope): concise English PR title (<= 60 chars)",
+  "files_changed": ["list of changed file paths"]
 }
 \`\`\`
 `.trim();
@@ -269,78 +269,78 @@ function buildExecPrompt(issueNumber) {
 
 function buildAskPrompt(question, projectName) {
   return `
-# 기술 질문
+# Technical Question
 
-## 프로젝트 컨텍스트
-${projectName} 프로젝트 관련 질문이야.
+## Project Context
+This question is about the ${projectName} project.
 
-## 질문
+## Question
 ${question}
 
-## 답변 형식
-- 핵심 답변 먼저 (두괄식)
-- 프로젝트 코드베이스에 맞는 구체적인 예시 포함
-- 코드 예시는 실제 이 프로젝트에서 쓸 수 있는 것으로
-- 길이: 충분히 상세하되 불필요한 설명 제거
+## Response Format
+- Lead with the core answer
+- Include concrete examples grounded in this codebase
+- Use examples that could realistically be applied in this project
+- Be detailed enough to be useful, but avoid filler
   `.trim();
 }
 
 function buildGPTReviewPrompt(diff, claudeMd, taskDescription) {
-  return `너는 시니어 개발자이고 코드 리뷰어다. 주어진 git diff를 리뷰해줘.
+  return `You are a senior engineer and code reviewer. Review the provided git diff.
 
-${claudeMd ? `## 프로젝트 컨벤션\n${claudeMd}\n` : ''}
+${claudeMd ? `## Project Conventions\n${claudeMd}\n` : ''}
 
-## 구현 목표
-${taskDescription || '(명시되지 않음)'}
+## Implementation Goal
+${taskDescription || '(not specified)'}
 
-## 심각도 기준
-- **[높음]**: 런타임 에러, 데이터 손실, 보안 취약점 — 실제 장애가 나는 것만
-- **[중간]**: 확실한 성능 문제 (N+1 쿼리 등), 확실한 로직 버그
-- **[낮음]**: 컨벤션, 네이밍, 스타일, 개선 제안, 추측성 이슈
+## Severity Guide
+- **[high]**: runtime errors, data loss, security vulnerabilities, or other concrete production failures
+- **[medium]**: definite logic bugs or confirmed performance problems such as N+1 queries
+- **[low]**: conventions, naming, style, improvement ideas, or speculative concerns
 
-## 중요 규칙
-- diff가 잘려 있는 것은 이슈가 아니다
-- "~할 수 있음", "~가능성" 같은 추측은 낮음
-- 높음/중간은 확실한 문제만. 애매하면 낮음
+## Important Rules
+- A truncated diff is not an issue by itself
+- Speculative claims such as "might" or "could" should be treated as low severity
+- Only classify something as high or medium when the problem is clear and defensible. If uncertain, mark it low
 
-## 출력 형식
-### 총평
-한줄 요약
+## Output Format
+### Summary
+One-line overall assessment
 
-### 변경 파일
-변경된 파일 목록과 각 파일의 변경 요약
+### Changed Files
+List changed files and briefly summarize what changed in each
 
-### 이슈 목록
-- **[높음]** 파일:라인 — 문제 — 제안
-- **[중간]** 파일:라인 — 문제 — 제안
-- **[낮음]** 파일:라인 — 문제 — 제안
+### Findings
+- **[high]** file:line - problem - recommendation
+- **[medium]** file:line - problem - recommendation
+- **[low]** file:line - problem - recommendation
 
-이슈가 없으면 "이슈 없음"
+If there are no issues, write "No issues".
 
-### 잘한 점
-좋은 구현이 있으면 언급
+### Strengths
+Mention notable implementation strengths when they exist
 
-### 결론
-- 높음/중간 없으면 → 승인(LGTM)
-- 높음/중간 있으면 → 수정 필요
-- 심각한 보안/설계 결함 → 반려
+### Verdict
+- If there are no high or medium findings -> Approve (LGTM)
+- If there are high or medium findings -> Needs changes
+- If there is a severe security or design flaw -> Reject
 
-반드시 하나로 명시: 승인(LGTM) / 수정 필요 / 반려`;
+State exactly one final verdict: Approve (LGTM) / Needs changes / Reject`;
 }
 
 function buildAutoFixPrompt(reviewText, attempt) {
   return `
-# 리뷰 피드백 수정 (${attempt}차)
+# Address Review Feedback (Attempt ${attempt})
 
-## GPT-5.4 리뷰 결과
+## GPT-5.4 Review Output
 ${reviewText}
 
-## 지침
-- [높음], [중간] 이슈 모두 수정
-- [낮음]은 판단하여 선택 수정
-- 수정 후 빌드/테스트 재실행하여 통과 확인
-- 관련 없는 코드 건드리지 말 것
-- 이전 작업 맥락은 이미 알고 있으니 바로 수정에 집중
+## Instructions
+- Fix all [high] and [medium] findings
+- Use judgment for [low] findings
+- Re-run build and test verification after making changes
+- Do not touch unrelated code
+- Prior context is already known, so focus directly on the fixes
 `.trim();
 }
 
@@ -393,21 +393,21 @@ async function ensureRepo(name) {
   if (!fs.existsSync(dir)) {
     await runCmd(`git clone ${project.repo} ${dir}`, WORKSPACE);
   } else {
-    // dirty 상태 정리 후 base 브랜치로 복귀
+    // Clean up a dirty worktree, then return to the base branch.
     try {
       await runCmd('git reset HEAD -- . 2>/dev/null; git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null', dir);
     } catch {}
     try {
       await runCmd(`git checkout ${project.branch}`, dir);
     } catch {}
-    // pull 실패 시 재클론 (conflict 등 복구 불가 상태 대비)
+    // Re-clone if pull fails, for example when the repo is unrecoverably conflicted.
     try {
       await runCmd(`git pull origin ${project.branch}`, dir);
     } catch {
       fs.rmSync(dir, { recursive: true, force: true });
       await runCmd(`git clone ${project.repo} ${dir}`, WORKSPACE);
     }
-    // 이전 작업에서 남은 claude/* 브랜치 정리 (merge 완료된 것만 삭제)
+    // Remove leftover claude/* branches from earlier work, but only if fully merged.
     try {
       const branches = await runCmd('git branch --list claude/*', dir);
       if (branches) {
@@ -420,7 +420,7 @@ async function ensureRepo(name) {
   return dir;
 }
 
-// ─── PR 본문 생성 (Claude 요약 기반) ───
+// ─── PR body generation from Claude output ───
 function buildPRBody(workOutput, issueNumber, review) {
   let body = `## Summary\n\n${workOutput.summary}\n\n`;
   body += `## Changes\n\n`;
@@ -432,16 +432,16 @@ function buildPRBody(workOutput, issueNumber, review) {
   }
   if (review) {
     const lower = review.toLowerCase();
-    let conclusion = '⚠️ 수정 필요';
-    if (lower.includes('반려')) conclusion = '❌ 반려';
-    else if (lower.includes('승인') || lower.includes('lgtm')) conclusion = '✅ 승인 (LGTM)';
-    body += `## AI Review\n\n**결과:** ${conclusion}\n\n`;
+    let conclusion = '⚠️ Needs changes';
+    if (lower.includes('reject') || lower.includes('rejected') || lower.includes('반려')) conclusion = '❌ Reject';
+    else if (lower.includes('approve') || lower.includes('approved') || lower.includes('승인') || lower.includes('lgtm')) conclusion = '✅ Approve (LGTM)';
+    body += `## AI Review\n\n**Verdict:** ${conclusion}\n\n`;
   }
   body += '---\n> 🤖 Generated by **Claude Code Bot**';
   return body;
 }
 
-// ─── Issue 본문 생성 ───
+// ─── Issue body generation ───
 async function generateIssueBody(taskDescription, projectName, changeSummary, prUrl) {
   try {
     const issuePrompt = buildIssueBodyPrompt(taskDescription, projectName);
@@ -451,7 +451,7 @@ async function generateIssueBody(taskDescription, projectName, changeSummary, pr
       body += `\n\n## Related PR\n\n${prUrl}`;
     }
     if (changeSummary && changeSummary.summary) {
-      body += `\n\n## 변경사항 요약\n\n${changeSummary.summary}`;
+      body += `\n\n## Change Summary\n\n${changeSummary.summary}`;
       if (Array.isArray(changeSummary.changes)) {
         body += '\n' + changeSummary.changes.map(c => `- ${c}`).join('\n');
       }
@@ -467,7 +467,7 @@ async function generateIssueBody(taskDescription, projectName, changeSummary, pr
   }
 }
 
-// ─── GPT-5.4 리뷰 (cross-model review 유지) ───
+// ─── GPT-5.4 review (keep cross-model review) ───
 async function reviewWithGPT(diff, claudeMd, taskDescription) {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const systemPrompt = buildGPTReviewPrompt(diff, claudeMd, taskDescription);
@@ -475,20 +475,20 @@ async function reviewWithGPT(diff, claudeMd, taskDescription) {
   const response = await openai.responses.create({
     model: 'gpt-5.4',
     instructions: systemPrompt,
-    input: `다음 코드 변경사항을 리뷰해줘:\n\n\`\`\`diff\n${diff.slice(0, 80000)}\n\`\`\``,
+    input: `Review the following code changes:\n\n\`\`\`diff\n${diff.slice(0, 80000)}\n\`\`\``,
     reasoning: { effort: 'high' },
   });
 
   return response.output_text;
 }
 
-// ─── 리뷰 기능 ───
+// ─── Review helpers ───
 function isLGTM(review) {
   if (!review) return true;
   const lower = review.toLowerCase();
-  if (lower.includes('반려')) return false;
-  if (lower.includes('심각도: 높음') || lower.includes('[높음]')) return false;
-  if (lower.includes('심각도: 중간') || lower.includes('[중간]')) return false;
+  if (lower.includes('reject') || lower.includes('rejected') || lower.includes('반려')) return false;
+  if (lower.includes('severity: high') || lower.includes('[high]') || lower.includes('심각도: 높음') || lower.includes('[높음]')) return false;
+  if (lower.includes('severity: medium') || lower.includes('[medium]') || lower.includes('심각도: 중간') || lower.includes('[중간]')) return false;
   return true;
 }
 
@@ -501,7 +501,7 @@ async function reviewCode(dir, branch, baseBranch, channel, taskDescription) {
     return { review: null, passed: true };
   }
 
-  // CLAUDE.md 읽기 (프로젝트 컨벤션)
+  // Read CLAUDE.md for project conventions.
   let claudeMd = '';
   const claudeMdPath = path.join(dir, 'CLAUDE.md');
   if (fs.existsSync(claudeMdPath)) {
@@ -522,20 +522,20 @@ async function autoFix(dir, reviewText, channel, attempt, sessionId) {
   const status = await runCmd('git status --porcelain', dir);
   if (status) {
     await runCmd('git add -A -- . ":!.env" ":!.env.*" ":!*.tmp" ":!*.log"', dir);
-    await gitCommit(`refactor(review): ${attempt}차 리뷰 반영`, dir);
+    await gitCommit(`refactor(review): address review feedback ${attempt}`, dir);
     await channel.send('✅ 수정 커밋 완료');
   }
 
   return result;
 }
 
-// ─── 이슈 번호 추출 ───
+// ─── Issue number extraction ───
 function extractIssueNumber(prompt) {
   const match = prompt.match(/(?:이슈|issue|#)\s*:?\s*#?(\d+)/i);
   return match ? match[1] : null;
 }
 
-// ─── 브랜치 정리 ───
+// ─── Branch cleanup ───
 async function cleanupBranch(dir, branch, baseBranch) {
   try { await runSpawn('git', ['checkout', '-f', baseBranch], dir); } catch {
     try { await runSpawn('git', ['checkout', '--detach', 'HEAD'], dir); } catch {}
@@ -564,13 +564,13 @@ async function squashBranchCommits(dir, baseBranch, finalMessage) {
   }
 }
 
-// ─── 공통 work 로직 (Plan → Execute → Review 파이프라인) ───
+// ─── Shared work flow (Plan -> Execute -> Review pipeline) ───
 async function doWork(projectName, prompt, message) {
   const dir = await ensureRepo(projectName);
   const baseBranch = PROJECTS[projectName].branch;
   const startTime = Date.now();
 
-  // 프로젝트 설정 확인
+  // Check project setup.
   const setupWarning = checkProjectSetup(dir, projectName);
   if (setupWarning) {
     await message.channel.send(setupWarning);
@@ -581,10 +581,10 @@ async function doWork(projectName, prompt, message) {
   await runCmd(`git checkout -b ${branch}`, dir);
   await message.channel.send(`🌿 브랜치: ${branch}`);
 
-  // 이슈 번호 추출
+  // Extract the issue number from the prompt.
   const issueNumber = extractIssueNumber(prompt);
 
-  // /command 처리
+  // Expand /command templates when present.
   let isCustomCommand = false;
   let finalPrompt = prompt;
   const cmdMatch = prompt.match(/^\/([\w-]+)\s*(.*)/s);
@@ -598,18 +598,18 @@ async function doWork(projectName, prompt, message) {
     }
   }
 
-  // ── Phase 1: 계획 수립 ──
+  // ── Phase 1: planning ──
   let planSessionId = null;
   if (!isCustomCommand) {
     await message.channel.send('📋 작업 계획 수립 중...');
     const planPrompt = buildPlanPrompt(prompt, issueNumber, { name: projectName, path: dir });
     const planResult = await runClaude(planPrompt, dir);
     planSessionId = planResult.sessionId;
-    // 계획을 디스코드에 공유
+    // Share the plan in Discord.
     await sendChunks(message.channel, planResult.text.slice(0, 2000));
   }
 
-  // ── Phase 2: 구현 (세션 이어받기, 실패 시 새 세션 폴백) ──
+  // ── Phase 2: execution (resume session when possible, otherwise fall back) ──
   await message.channel.send('🤖 구현 중... (최대 10분)');
   let execResult;
   if (isCustomCommand) {
@@ -619,7 +619,7 @@ async function doWork(projectName, prompt, message) {
     try {
       execResult = await runClaude(execPrompt, dir, { sessionId: planSessionId });
     } catch (resumeErr) {
-      // --resume 실패 시 새 세션으로 폴백
+      // Fall back to a new session if `--resume` fails.
       await message.channel.send('⚠️ 세션 이어받기 실패, 새 세션으로 재시도...');
       const fullPrompt = buildPlanPrompt(prompt, issueNumber, { name: projectName, path: dir }) + '\n\n' + execPrompt;
       execResult = await runClaude(fullPrompt, dir);
@@ -637,14 +637,14 @@ async function doWork(projectName, prompt, message) {
     return { changed: false };
   }
 
-  // Claude 응답에서 구조화된 데이터 추출
+  // Extract structured data from the Claude response.
   const workOutput = parseWorkOutput(execResult.text, prompt);
 
-  // 커밋 (Claude가 생성한 커밋 메시지 사용)
+  // Commit using the message generated by Claude.
   await runCmd('git add -A', dir);
   await gitCommit(workOutput.commit_message, dir);
 
-  // ── Phase 3: GPT-5.4 리뷰 (cross-model) ──
+  // ── Phase 3: GPT-5.4 review (cross-model) ──
   let reviewPassed = false;
   let lastReview = null;
   const reviewHistory = [];
@@ -665,7 +665,7 @@ async function doWork(projectName, prompt, message) {
 
     if (attempt === MAX_REVIEW_RETRIES) break;
     await message.channel.send(`⚠️ 수정 필요 → 자동 수정 (${attempt}/${MAX_REVIEW_RETRIES})`);
-    // 같은 세션에서 수정 → Claude가 자기 작업 맥락을 유지 (실패 시 새 세션)
+    // Fix in the same session to preserve Claude's working context, with fallback if needed.
     try {
       await autoFix(dir, review, message.channel, attempt, workSessionId);
     } catch {
@@ -678,11 +678,11 @@ async function doWork(projectName, prompt, message) {
     return { changed: true, pushed: false };
   }
 
-  // 푸시
+  // Push the work branch.
   await squashBranchCommits(dir, baseBranch, workOutput.commit_message);
   await runCmd(`git push origin ${branch}`, dir);
 
-  // PR 생성 (Claude가 만든 요약 활용)
+  // Create the PR using Claude's structured summary.
   const repoSlug = PROJECTS[projectName].repo.replace('https://github.com/', '').replace('.git', '');
   let prUrl = null;
   const tmpPrBody = path.join(dir, '.pr-body.tmp');
@@ -703,7 +703,7 @@ async function doWork(projectName, prompt, message) {
     if (fs.existsSync(tmpPrBody)) fs.unlinkSync(tmpPrBody);
   }
 
-  // 이슈 생성
+  // Create a follow-up issue.
   const tmpIssueBody = path.join(dir, '.issue-body.tmp');
   try {
     const issueBody = await generateIssueBody(
@@ -724,7 +724,7 @@ async function doWork(projectName, prompt, message) {
     if (fs.existsSync(tmpIssueBody)) fs.unlinkSync(tmpIssueBody);
   }
 
-  // 작업 완료 후 base 브랜치로 복귀
+  // Return to the base branch after the work completes.
   try {
     await runCmd(`git checkout ${baseBranch}`, dir);
   } catch {}
@@ -735,9 +735,9 @@ async function doWork(projectName, prompt, message) {
   return { changed: true, pushed: true };
 }
 
-// ─── 명령어 파싱 ───
+// ─── Command parsing ───
 function parseCommand(content) {
-  // 멀티: !work blog-api,blog-web 작업
+  // Multi-project form: !work blog-api,blog-web <task>
   const multiWorkMatch = content.match(/^!work\s+([\w-]+(?:,[\w-]+)+)\s+(.+)$/s);
   if (multiWorkMatch) {
     const projects = multiWorkMatch[1].split(',').map(p => p.trim());
@@ -765,24 +765,25 @@ function parseCommand(content) {
   return null;
 }
 
-// ─── 자연어 파싱 ───
+// ─── Natural-language parsing ───
 async function parseNaturalLanguage(text) {
   const projectNames = Object.keys(PROJECTS).join(', ');
-  const prompt = `사용자가 디스코드에서 보낸 메시지를 분석해서 JSON으로만 응답해줘.
+  const prompt = `Analyze the Discord message below and respond with JSON only.
 
-등록된 프로젝트: ${projectNames}
+Registered projects: ${projectNames}
 
-## 판단 기준
-- 코드 수정/개발/추가/구현/리팩토링/버그수정/맞춰줘/통일/고쳐 → type: "work"
-- 질문/설명/분석/어떻게/뭐야/알려줘 → type: "ask"
-- 프로젝트가 여러 개면 projects 배열에 모두 포함
-- 약칭 매칭: "api"→"blog-api", "web"→"blog-web", "ai"→"blog-ai"
-- 프로젝트명이 없으면 projects를 빈 배열로
+## Classification Rules
+- If the user asks for code changes, implementation, refactoring, fixes, alignment, or cleanup such as "수정", "구현", "리팩토링", "고쳐", set type to "work"
+- If the user asks for explanation, analysis, or questions such as "질문", "설명", "분석", "어떻게", "뭐야", "알려줘", set type to "ask"
+- If multiple projects are mentioned, include all of them in the \`projects\` array
+- Alias mapping: "api" -> "blog-api", "web" -> "blog-web", "ai" -> "blog-ai"
+- If no project is identified, return an empty \`projects\` array
 
-## 응답 (JSON만, 설명 없이)
-{"type": "work", "projects": ["blog-api"], "prompt": "실제 작업 내용"}
+## Response
+Return JSON only, with no explanation.
+{"type": "work", "projects": ["blog-api"], "prompt": "actual task description"}
 
-메시지: ${text}`;
+Message: ${text}`;
 
   try {
     const result = await runOpenAIText(prompt);
@@ -792,14 +793,14 @@ async function parseNaturalLanguage(text) {
   return null;
 }
 
-// ─── 메시지 핸들러 ───
+// ─── Message handler ───
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   if (message.channel.id !== process.env.DISCORD_CHANNEL_ID) return;
 
   let cmd = parseCommand(message.content);
 
-  // ! 명령어 아니면 자연어 체크 (봇 멘션 또는 봇 이름 포함)
+  // If it is not a direct command, try natural-language parsing when the bot is mentioned.
   if (!cmd) {
     const content = message.content;
     const botMentioned = message.mentions.users.has(client.user.id);
@@ -859,7 +860,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ─── 멀티 프로젝트 ───
+  // ─── Multi-project flow ───
   if (cmd.type === 'multi-work') {
     const invalid = cmd.projects.filter(p => !PROJECTS[p]);
     if (invalid.length > 0) {
@@ -887,7 +888,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // 프로젝트 검증
+  // Validate the target project.
   if (!PROJECTS[cmd.project]) {
     await message.reply(`프로젝트 "${cmd.project}" 없음. 등록: ${Object.keys(PROJECTS).join(', ')}`);
     return;
@@ -966,27 +967,27 @@ client.on('messageCreate', async (message) => {
       }
       await message.channel.send('🤖 수정 중...');
       const fixPrompt = `
-# 수동 수정 요청
+# Manual Fix Request
 
-## 수정 내용
+## Requested Change
 ${cmd.prompt}
 
-## 지침
-- 요청한 부분만 정확히 수정
-- 수정 후 빌드/테스트 통과 확인
-- 관련 없는 코드 건드리지 말 것
+## Instructions
+- Modify only the requested area
+- Verify that build and tests pass after the change
+- Do not touch unrelated code
 `.trim();
       const result = await runClaude(fixPrompt, dir);
       const fixStatus = await runCmd('git status --porcelain', dir);
       if (fixStatus) {
         await runCmd('git add -A -- . ":!.env" ":!.env.*" ":!*.tmp" ":!*.log"', dir);
-        // Claude에게 커밋 메시지도 생성 요청
+        // Ask Claude to generate the commit message as well.
         const msgResult = await runClaude(
-          '방금 수정한 내용에 대해 conventional commits 형식의 커밋 메시지를 한 줄만 출력해. 다른 텍스트 없이.',
+          'Based on the fix you just made, output exactly one Conventional Commits commit message line in English. No extra text.',
           dir,
           { sessionId: result.sessionId },
         );
-        const commitMsg = msgResult.text.split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72) || 'fix: 수동 수정';
+        const commitMsg = msgResult.text.split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72) || 'fix: apply manual fix';
         await gitCommit(commitMsg, dir);
         await runCmd(`git push origin ${currentBranch}`, dir);
         await message.channel.send('✅ 수정 푸시 완료');
@@ -1007,7 +1008,7 @@ ${cmd.prompt}
   }
 });
 
-// ─── 시작 ───
+// ─── Startup ───
 client.once('ready', () => {
   console.log(`Bot ready: ${client.user.tag}`);
   console.log(`Channel: ${process.env.DISCORD_CHANNEL_ID}`);

@@ -1,50 +1,50 @@
 ---
 name: git-commit
-description: 커밋 메시지를 작성할 때 사용. staged 변경사항을 분석해서 프로젝트 컨벤션에 맞는 커밋 메시지를 생성한다.
+description: Use when writing a commit message. Analyze staged changes and generate a message that follows project conventions.
 ---
 
-# Git Commit Message 규칙
+# Git Commit Message Rules
 
-## 형식 — Conventional Commits
+## Format - Conventional Commits
 
 ```
-type(scope): 제목 (72자 이내, 한국어 가능)
+type(scope): title (within 72 characters)
 
-본문 (선택: 복잡한 변경일 때만)
-- 무엇을 변경했는지
-- 왜 변경했는지 (어떻게는 쓰지 않음)
+Body (optional: only for complex changes)
+- What changed
+- Why it changed, not how
 
-Footer (선택)
-Closes #이슈번호
+Footer (optional)
+Closes #issue-number
 ```
 
-## Type 목록
+## Allowed Types
 
-| type | 언제 | 예시 |
+| type | When to use | Example |
 |------|------|------|
-| feat | 새 기능 추가 | feat(auth): JWT 로그인 API 추가 |
-| fix | 버그 수정 | fix(post): 페이지네이션 마지막 페이지 중복 조회 수정 |
-| refactor | 동작 변경 없는 코드 개선 | refactor(user): Service 레이어 메서드 분리 |
-| test | 테스트 추가/수정 | test(auth): 토큰 만료 케이스 테스트 추가 |
-| docs | 문서만 변경 | docs: API 엔드포인트 설명 보강 |
-| chore | 빌드, 의존성, 설정 변경 | chore: Dockerfile 멀티스테이지 빌드 적용 |
-| perf | 성능 개선 | perf(query): 게시글 목록 N+1 쿼리 해결 |
-| style | 포매팅 (동작 무관) | style: ktlint 자동 포맷 적용 |
+| feat | Add a new feature | feat(auth): add JWT login API |
+| fix | Fix a bug | fix(post): remove duplicate last-page pagination query |
+| refactor | Improve code without behavior change | refactor(user): split service layer responsibilities |
+| test | Add or update tests | test(auth): add token expiration coverage |
+| docs | Documentation-only change | docs: expand API endpoint documentation |
+| chore | Build, dependency, or config changes | chore: adopt multi-stage Docker build |
+| perf | Performance improvement | perf(query): fix N+1 query in post list |
+| style | Formatting-only change | style: apply ktlint auto-format |
 
-## Scope 규칙
-- 변경의 가장 핵심적인 도메인/모듈명 사용
-- 봇 프로젝트: commit, review, prompt, discord, cli
+## Scope Rules
+- Use the domain or module that best represents the main change
+- Bot project scopes: `commit`, `review`, `prompt`, `discord`, `cli`
 - blog-api: auth, post, user, comment, common
 - blog-web: page, component, api, hook
 
-## 나쁜 예시 (절대 금지)
-- `update code` — 무엇을 업데이트?
-- `fix bug` — 어떤 버그?
-- `WIP`, `.`, `temp` — 의미 없는 메시지
-- `feat: JWT 기반 로그인 API를 추가하였습니다` — 과도한 존칭/설명체
+## Bad Examples
+- `update code` - too vague
+- `fix bug` - does not identify the bug
+- `WIP`, `.`, `temp` - meaningless messages
+- `feat: implemented JWT login API successfully` - unnecessarily verbose
 
-## 판단 기준
-1. git diff --staged로 변경사항 파악
-2. **가장 핵심적인 변경 하나**를 제목으로 (여러 관심사 → 분리 커밋 고려)
-3. 제목만으로 "무엇이 바뀌었는지" 알 수 있어야 함
-4. 이슈 번호가 있으면 Footer에 `Closes #번호`
+## Decision Criteria
+1. Inspect changes with `git diff --staged`
+2. Make the title about the **single most important change**. If there are multiple concerns, consider splitting the commit.
+3. The title alone should make the change understandable
+4. If there is an issue number, add `Closes #number` in the footer
