@@ -130,7 +130,10 @@ async function ensureRepo(name) {
     await runCmd(`git clone ${project.repo} ${dir}`, WORKSPACE);
   } else {
     try {
-      await runCmd(`git checkout ${project.branch} && git pull origin ${project.branch}`, dir);
+      // dirty 상태 정리 후 base 브랜치로 복귀
+      await runCmd('git reset HEAD -- . 2>/dev/null; git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null', dir);
+      await runCmd(`git checkout ${project.branch}`, dir);
+      await runCmd(`git pull origin ${project.branch}`, dir);
     } catch {}
   }
   return dir;
@@ -491,6 +494,11 @@ async function doWork(projectName, prompt, message) {
   } finally {
     if (fs.existsSync(tmpIssueBody)) fs.unlinkSync(tmpIssueBody);
   }
+
+  // 작업 완료 후 base 브랜치로 복귀
+  try {
+    await runCmd(`git checkout ${baseBranch}`, dir);
+  } catch {}
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
   await message.channel.send(`✅ 완료! (${elapsed}초)`);
