@@ -1,4 +1,4 @@
-# claude-dev-bot Agent Guide
+# Dev Orchestrator Agent Guide
 
 ## 프로젝트 개요
 Discord 봇으로 Claude Code CLI + GPT-5.4 리뷰를 연동하여

@@ -1,5 +1,5 @@
 {
-  "name": "claude-dev-bot",
+  "name": "dev-orchestrator",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",

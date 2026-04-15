@@ -32,8 +32,8 @@ const PROJECTS = {
     repo: 'https://github.com/seeeeeeong/blog-web.git',
     branch: 'main',
   },
-  'claude-dev-bot': {
-    repo: 'https://github.com/seeeeeeong/claude-dev-bot.git',
+  'dev-orchestrator': {
+    repo: 'https://github.com/seeeeeeong/dev-orchestrator.git',
     branch: 'main',
   },
 };
