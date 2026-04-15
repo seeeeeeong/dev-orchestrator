@@ -644,13 +644,20 @@ async function cleanupBranch(dir, branch, baseBranch) {
 async function squashBranchCommits(dir, baseBranch, finalMessage) {
   const count = parseInt(await runCmd(`git rev-list --count ${baseBranch}..HEAD`, dir), 10);
   if (isNaN(count) || count <= 1) return;
+
   const origHead = (await runCmd('git rev-parse HEAD', dir)).trim();
-  await runCmd(`git reset --soft ${baseBranch}`, dir);
-  const staged = await runCmd('git diff --cached --stat', dir);
-  if (staged) {
+
+  try {
+    await runCmd(`git reset --soft ${baseBranch}`, dir);
+    const staged = await runCmd('git diff --cached --stat', dir);
+    if (!staged) {
+      await runCmd(`git reset --soft ${origHead}`, dir);
+      return;
+    }
     await gitCommit(finalMessage, dir);
-  } else {
-    await runCmd(`git reset --soft ${origHead}`, dir);
+  } catch (e) {
+    try { await runCmd(`git reset --soft ${origHead}`, dir); } catch {}
+    throw e;
   }
 }
 
