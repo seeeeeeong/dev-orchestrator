@@ -72,17 +72,29 @@ function runSpawn(cmd, args, cwd) {
   });
 }
 
-function gitCommit(message, cwd) {
-  return new Promise((resolve, reject) => {
-    const safeMsg = (message || 'feat: 자동 작업').trim() || 'feat: 자동 작업';
-    const proc = spawn('git', ['commit', '-m', safeMsg], { cwd, env: process.env });
-    let stdout = '', stderr = '';
-    proc.stdout.on('data', (d) => (stdout += d));
-    proc.stderr.on('data', (d) => (stderr += d));
-    proc.on('close', (code) =>
-      code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr || stdout))
-    );
-  });
+function sanitizeCommitMsg(raw) {
+  const msg = (raw || '').replace(/[^\x20-\x7E\uAC00-\uD7A3\u3131-\u318E]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  return msg || 'feat: 자동 작업';
+}
+
+async function gitCommit(message, cwd) {
+  // staged 변경사항 확인
+  try {
+    await runSpawn('git', ['diff', '--cached', '--quiet'], cwd);
+    // exit 0 = 변경 없음 → 커밋 불필요
+    return null;
+  } catch {
+    // exit 1 = 변경 있음 → 커밋 진행
+  }
+
+  const safeMsg = sanitizeCommitMsg(message);
+  try {
+    return await runSpawn('git', ['commit', '-m', safeMsg], cwd);
+  } catch (err) {
+    // 메시지 문제일 수 있으므로 fallback 메시지로 재시도
+    return await runSpawn('git', ['commit', '-m', 'feat: 자동 작업'], cwd);
+  }
 }
 
 function runClaude(prompt, cwd) {
@@ -154,8 +166,12 @@ ${diffContent.slice(0, 5000)}`;
 
   try {
     const msg = await runClaude(prompt, dir);
-    const cleaned = msg.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 50);
-    if (cleaned) return cleaned;
+    const firstLine = msg.split('\n')[0]
+      .replace(/^["'`\s]+|["'`\s]+$/g, '')
+      .replace(/[^\x20-\x7E\uAC00-\uD7A3\u3131-\u318E]/g, '')
+      .trim()
+      .slice(0, 50);
+    if (firstLine && firstLine.length >= 5) return firstLine;
   } catch {}
   return 'feat: 자동 작업';
 }
@@ -370,12 +386,14 @@ ${reviewText}
 
   const result = await runClaude(fixPrompt, dir);
 
-  const status = await runCmd('git status --porcelain', dir);
-  if (status) {
+  const fixStatus = await runCmd('git status --porcelain', dir);
+  if (fixStatus) {
     await runCmd('git add -A', dir);
     const fixMsg = await generateCommitMsg(dir);
-    await gitCommit(fixMsg, dir);
-    await channel.send('✅ 수정 커밋 완료');
+    const fixCommitResult = await gitCommit(fixMsg, dir);
+    if (fixCommitResult !== null) {
+      await channel.send('✅ 수정 커밋 완료');
+    }
   }
 
   return result;
@@ -419,7 +437,14 @@ async function doWork(projectName, prompt, message) {
   // 커밋 (Claude가 메시지 생성)
   await runCmd('git add -A', dir);
   const commitMsg = await generateCommitMsg(dir);
-  await gitCommit(commitMsg, dir);
+  const commitResult = await gitCommit(commitMsg, dir);
+  if (commitResult === null) {
+    await runCmd(`git checkout ${baseBranch}`, dir);
+    await runCmd(`git branch -d ${branch}`, dir);
+    await message.channel.send('📋 staged 변경사항 없음 — 커밋 생략');
+    await sendChunks(message.channel, result.slice(0, 3800));
+    return { changed: false };
+  }
 
   // 리뷰 루프
   let reviewPassed = false;
@@ -723,13 +748,17 @@ client.on('messageCreate', async (message) => {
       }
       await message.channel.send('🤖 수정 중...');
       const result = await runClaude(`리뷰 피드백을 반영해서 코드를 수정해줘: ${cmd.prompt}`, dir);
-      const status = await runCmd('git status --porcelain', dir);
-      if (status) {
+      const fixStatus = await runCmd('git status --porcelain', dir);
+      if (fixStatus) {
         await runCmd('git add -A', dir);
         const fixCommitMsg = await generateCommitMsg(dir);
-        await gitCommit(fixCommitMsg, dir);
-        await runCmd(`git push origin ${currentBranch}`, dir);
-        await message.channel.send('✅ 수정 푸시 완료');
+        const fixResult = await gitCommit(fixCommitMsg, dir);
+        if (fixResult !== null) {
+          await runCmd(`git push origin ${currentBranch}`, dir);
+          await message.channel.send('✅ 수정 푸시 완료');
+        } else {
+          await message.channel.send('⚠️ staged 변경사항 없음 — 커밋 생략');
+        }
       }
       await sendChunks(message.channel, result.slice(0, 3800));
       return;
