@@ -7,7 +7,7 @@ const OpenAI = require('openai');
 
 // ─── 설정 ───
 const WORKSPACE = path.join(__dirname, 'repos');
-const MAX_REVIEW_RETRIES = 5;
+const MAX_REVIEW_RETRIES = 3;
 const OPENAI_MODEL = 'gpt-4.1-mini';
 
 // ─── OpenAI 텍스트 생성 공통 헬퍼 ───
@@ -641,6 +641,26 @@ async function cleanupBranch(dir, branch, baseBranch) {
   try { await runSpawn('git', ['push', 'origin', '--delete', branch], dir); } catch {}
 }
 
+async function squashBranchCommits(dir, baseBranch, finalMessage) {
+  const count = parseInt(await runCmd(`git rev-list --count ${baseBranch}..HEAD`, dir), 10);
+  if (isNaN(count) || count <= 1) return;
+
+  const origHead = (await runCmd('git rev-parse HEAD', dir)).trim();
+
+  try {
+    await runCmd(`git reset --soft ${baseBranch}`, dir);
+    const staged = await runCmd('git diff --cached --stat', dir);
+    if (!staged) {
+      await runCmd(`git reset --soft ${origHead}`, dir);
+      return;
+    }
+    await gitCommit(finalMessage, dir);
+  } catch (e) {
+    try { await runCmd(`git reset --soft ${origHead}`, dir); } catch {}
+    throw e;
+  }
+}
+
 // ─── 공통 work 로직 ───
 async function doWork(projectName, prompt, message) {
   const dir = await ensureRepo(projectName);
@@ -718,11 +738,12 @@ async function doWork(projectName, prompt, message) {
   }
 
   if (!reviewPassed) {
-    await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
+    await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n브랜치 \`${branch}\`에 작업 내용이 남아 있습니다.\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
     return { changed: true, pushed: false };
   }
 
   // 푸시
+  await squashBranchCommits(dir, baseBranch, commitMsg);
   await runCmd(`git push origin ${branch}`, dir);
 
   // 제목 + 변경사항 요약 생성
@@ -1030,9 +1051,7 @@ client.on('messageCreate', async (message) => {
     try {
       const errDir = path.join(WORKSPACE, cmd.project);
       const cur = await runCmd('git branch --show-current', errDir);
-      if (cur.startsWith('claude/') && baseBranch) {
-        try { await runCmd(`git checkout -f ${baseBranch}`, errDir); } catch {}
-      }
+      if (cur.startsWith('claude/') && baseBranch) await runSpawn('git', ['checkout', '-f', baseBranch], errDir);
     } catch {}
   } finally {
     working = false;
