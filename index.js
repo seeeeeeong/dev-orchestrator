@@ -8,6 +8,17 @@ const OpenAI = require('openai');
 // ─── 설정 ───
 const WORKSPACE = path.join(__dirname, 'repos');
 const MAX_REVIEW_RETRIES = 5;
+const OPENAI_MODEL = 'gpt-4.1-mini';
+
+// ─── OpenAI 텍스트 생성 공통 헬퍼 ───
+async function runOpenAIText(prompt) {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const response = await openai.responses.create({
+    model: OPENAI_MODEL,
+    input: prompt,
+  });
+  return (response.output_text || '').trim();
+}
 const PROJECTS = {
   'blog-api': {
     repo: 'https://github.com/seeeeeeong/blog-api.git',
@@ -107,10 +118,25 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
       timeout: 600000,
     });
 
-    let output = '';
-    proc.stdout.on('data', (d) => (output += d));
-    proc.stderr.on('data', (d) => (output += d));
-    proc.on('close', () => resolve(cleanOutput(output.trim())));
+    let stdout = '';
+    proc.stdout.on('data', (d) => (stdout += d));
+    let stderr = '';
+    proc.stderr.on('data', (d) => (stderr += d));
+    proc.on('close', (code, signal) => {
+      if (signal) {
+        reject(new Error(`Claude CLI killed by signal ${signal}`));
+        return;
+      }
+      const output = cleanOutput(stdout.trim());
+      if (code !== 0 && code !== null) {
+        const errMsg = stderr.trim().slice(0, 500);
+        reject(new Error(`Claude CLI exited with code ${code}${output ? `\n${output.slice(0, 500)}` : ''}${errMsg ? `\nstderr: ${errMsg}` : ''}`));
+      } else if (output) {
+        resolve(output);
+      } else {
+        resolve('');
+      }
+    });
     proc.on('error', reject);
   });
 }
@@ -348,13 +374,24 @@ async function ensureRepo(name) {
       await runCmd(`git checkout ${project.branch}`, dir);
       await runCmd(`git pull origin ${project.branch}`, dir);
     } catch {}
+    // 이전 작업에서 남은 claude/* 브랜치 정리 (merge 완료된 것만 삭제)
+    try {
+      const branches = await runCmd('git branch --list claude/*', dir);
+      if (branches) {
+        for (const b of branches.split('\n').map(s => s.replace(/^\*\s*/, '').trim()).filter(Boolean)) {
+          try { await runSpawn('git', ['branch', '-d', b], dir); } catch {}
+        }
+      }
+    } catch {}
   }
   return dir;
 }
 
-// ─── Claude로 커밋 메시지 생성 ───
+// ─── OpenAI로 커밋 메시지 생성 (Claude CLI의 bash tool 실행 문제 방지) ───
 async function generateCommitMsg(dir, taskDescription, issueNumber) {
   const diffContent = await runCmd('git diff --cached', dir);
+  if (!diffContent.trim()) return 'chore: 자동 작업';
+
   const prompt = `다음 규칙으로 git 커밋 메시지를 작성해.
 
 ## 규칙
@@ -373,38 +410,21 @@ ${issueNumber || '없음'}
 ## staged 변경사항
 ${diffContent.slice(0, 5000)}
 
-## 출력 형식
-\`\`\`commit
-[여기에 커밋 메시지만]
-\`\`\`
-
-커밋 메시지 외 다른 텍스트 출력 금지.`;
+커밋 메시지만 출력해. 따옴표, 백틱, 설명 없이 커밋 메시지 텍스트만.`;
 
   try {
-    const msg = await runClaude(prompt, dir, { skipPrefix: true });
-    // ```commit 블록에서 추출
-    const commitBlockMatch = msg.match(/```commit\n([\s\S]+?)\n```/);
-    if (commitBlockMatch) {
-      const extracted = commitBlockMatch[1].trim();
-      if (extracted) return extracted;
-    }
-    // 일반 ``` 블록에서 추출
-    const codeBlockMatch = msg.match(/```\n([\s\S]+?)\n```/);
-    if (codeBlockMatch) {
-      const extracted = codeBlockMatch[1].trim();
-      if (extracted) return extracted;
-    }
+    const msg = await runOpenAIText(prompt);
     // Conventional Commits 패턴 직접 매칭
     const conventionalMatch = msg.match(/^(feat|fix|refactor|test|docs|chore|perf|style)(\(.+?\))?:\s*.+/m);
     if (conventionalMatch) return conventionalMatch[0].trim().slice(0, 72);
-    // 첫 줄 폴백 (따옴표, 백틱 제거)
+    // 첫 줄 폴백
     const firstLine = msg.split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72);
     if (firstLine) return firstLine;
   } catch {}
   return 'feat: 자동 작업';
 }
 
-// ─── Claude로 제목 생성 ───
+// ─── OpenAI로 제목 생성 ───
 async function generateTitle(prompt, result) {
   const genPrompt = `아래 작업 정보를 보고 GitHub 제목을 생성해. 제목 텍스트만 출력해.
 
@@ -417,8 +437,8 @@ async function generateTitle(prompt, result) {
 작업 결과: ${(result || '').slice(0, 2000)}`;
 
   try {
-    const raw = await runClaude(genPrompt, WORKSPACE, { skipPrefix: true });
-    const cleaned = raw.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
+    const titleText = await runOpenAIText(genPrompt);
+    const cleaned = titleText.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
     if (cleaned) return cleaned;
   } catch {}
   return prompt.slice(0, 60);
@@ -451,7 +471,7 @@ ${diffContent.slice(0, 8000)}
 {"summary": "...", "changes": ["index.js: 커밋 메시지 생성 로직 개선", ...]}`;
 
   try {
-    const raw = await runClaude(genPrompt, WORKSPACE, { skipPrefix: true });
+    const raw = await runOpenAIText(genPrompt);
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
@@ -491,7 +511,7 @@ ${issueNumber ? `Closes #${issueNumber}` : '없음'}
 
   let draft;
   try {
-    draft = await runClaude(draftPrompt, dir, { skipPrefix: true });
+    draft = await runOpenAIText(draftPrompt);
   } catch {
     // 폴백: 기존 방식으로 생성
     const changesSection = Array.isArray(changeSummary.changes)
@@ -521,7 +541,7 @@ ${issueNumber ? `Closes #${issueNumber}` : '없음'}
 async function generateIssueBody(taskDescription, projectName, changeSummary, prUrl, dir) {
   try {
     const issuePrompt = buildIssueBodyPrompt(taskDescription, projectName);
-    let body = await runClaude(issuePrompt, dir, { skipPrefix: true });
+    let body = await runOpenAIText(issuePrompt);
 
     if (prUrl) {
       body += `\n\n## Related PR\n\n${prUrl}`;
@@ -599,8 +619,7 @@ async function autoFix(dir, reviewText, channel, taskDescription, reviewHistory,
   const status = await runCmd('git status --porcelain', dir);
   if (status) {
     await runCmd('git add -A', dir);
-    const fixMsg = await generateCommitMsg(dir, `리뷰 피드백 반영 (${attempt}차 수정)`);
-    await gitCommit(fixMsg, dir);
+    await gitCommit(`refactor(review): attempt ${attempt}`, dir);
     await channel.send('✅ 수정 커밋 완료');
   }
 
@@ -611,6 +630,15 @@ async function autoFix(dir, reviewText, channel, taskDescription, reviewHistory,
 function extractIssueNumber(prompt) {
   const match = prompt.match(/(?:이슈|issue|#)\s*:?\s*#?(\d+)/i);
   return match ? match[1] : null;
+}
+
+// ─── 브랜치 정리 ───
+async function cleanupBranch(dir, branch, baseBranch) {
+  try { await runSpawn('git', ['checkout', '-f', baseBranch], dir); } catch {
+    try { await runSpawn('git', ['checkout', '--detach', 'HEAD'], dir); } catch {}
+  }
+  try { await runSpawn('git', ['branch', '-D', branch], dir); } catch {}
+  try { await runSpawn('git', ['push', 'origin', '--delete', branch], dir); } catch {}
 }
 
 // ─── 공통 work 로직 ───
@@ -654,7 +682,7 @@ async function doWork(projectName, prompt, message) {
 
   if (!status) {
     await runCmd(`git checkout ${baseBranch}`, dir);
-    await runCmd(`git branch -d ${branch}`, dir);
+    try { await runCmd(`git branch -d ${branch}`, dir); } catch {}
     await message.channel.send('📋 코드 변경 없음');
     await sendChunks(message.channel, result.slice(0, 3800));
     return { changed: false };
@@ -802,7 +830,7 @@ async function parseNaturalLanguage(text) {
 메시지: ${text}`;
 
   try {
-    const result = await runClaude(prompt, WORKSPACE, { skipPrefix: true });
+    const result = await runOpenAIText(prompt);
     const jsonMatch = result.match(/\{[\s\S]*?\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
@@ -927,7 +955,7 @@ client.on('messageCreate', async (message) => {
       await message.reply(`📝 **${cmd.project}** 이슈 본문 생성 중...`);
       let body;
       try {
-        body = await runClaude(buildIssueBodyPrompt(description, cmd.project), dir, { skipPrefix: true });
+        body = await runOpenAIText(buildIssueBodyPrompt(description, cmd.project));
       } catch {
         body = description;
       }
@@ -999,7 +1027,13 @@ client.on('messageCreate', async (message) => {
 
   } catch (err) {
     await message.reply(`❌ 에러: ${err.message.slice(0, 1500)}`);
-    try { await runCmd(`git checkout ${baseBranch}`, path.join(WORKSPACE, cmd.project)); } catch {}
+    try {
+      const errDir = path.join(WORKSPACE, cmd.project);
+      const cur = await runCmd('git branch --show-current', errDir);
+      if (cur.startsWith('claude/') && baseBranch) {
+        try { await runCmd(`git checkout -f ${baseBranch}`, errDir); } catch {}
+      }
+    } catch {}
   } finally {
     working = false;
   }
