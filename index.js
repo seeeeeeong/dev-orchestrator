@@ -120,7 +120,8 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
 
     let stdout = '';
     proc.stdout.on('data', (d) => (stdout += d));
-    proc.stderr.on('data', () => {});
+    let stderr = '';
+    proc.stderr.on('data', (d) => (stderr += d));
     proc.on('close', (code, signal) => {
       if (signal) {
         reject(new Error(`Claude CLI killed by signal ${signal}`));
@@ -128,7 +129,8 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
       }
       const output = cleanOutput(stdout.trim());
       if (code !== 0 && code !== null) {
-        reject(new Error(`Claude CLI exited with code ${code}${output ? `\n${output.slice(0, 500)}` : ''}`));
+        const errMsg = stderr.trim().slice(0, 500);
+        reject(new Error(`Claude CLI exited with code ${code}${output ? `\n${output.slice(0, 500)}` : ''}${errMsg ? `\nstderr: ${errMsg}` : ''}`));
       } else if (output) {
         resolve(output);
       } else {
@@ -377,7 +379,7 @@ async function ensureRepo(name) {
       const branches = await runCmd('git branch --list claude/*', dir);
       if (branches) {
         for (const b of branches.split('\n').map(s => s.replace(/^\*\s*/, '').trim()).filter(Boolean)) {
-          try { await runCmd(`git branch -d ${b}`, dir); } catch {}
+          try { await runSpawn('git', ['branch', '-d', b], dir); } catch {}
         }
       }
     } catch {}
@@ -632,11 +634,11 @@ function extractIssueNumber(prompt) {
 
 // ─── 브랜치 정리 ───
 async function cleanupBranch(dir, branch, baseBranch) {
-  try { await runCmd(`git checkout -f ${baseBranch}`, dir); } catch {
-    try { await runCmd('git checkout --detach HEAD', dir); } catch {}
+  try { await runSpawn('git', ['checkout', '-f', baseBranch], dir); } catch {
+    try { await runSpawn('git', ['checkout', '--detach', 'HEAD'], dir); } catch {}
   }
-  try { await runCmd(`git branch -D ${branch}`, dir); } catch {}
-  try { await runCmd(`git push origin --delete ${branch}`, dir); } catch {}
+  try { await runSpawn('git', ['branch', '-D', branch], dir); } catch {}
+  try { await runSpawn('git', ['push', 'origin', '--delete', branch], dir); } catch {}
 }
 
 // ─── 공통 work 로직 ───
