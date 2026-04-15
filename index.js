@@ -107,10 +107,11 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
       timeout: 600000,
     });
 
-    let output = '';
-    proc.stdout.on('data', (d) => (output += d));
-    proc.stderr.on('data', (d) => (output += d));
-    proc.on('close', () => resolve(cleanOutput(output.trim())));
+    let stdout = '';
+    proc.stdout.on('data', (d) => (stdout += d));
+    // stderr는 무시 — Claude CLI 내부 도구 실행 에러가 결과에 섞이는 것을 방지
+    proc.stderr.on('data', () => {});
+    proc.on('close', () => resolve(cleanOutput(stdout.trim())));
     proc.on('error', reject);
   });
 }
@@ -348,6 +349,15 @@ async function ensureRepo(name) {
       await runCmd(`git checkout ${project.branch}`, dir);
       await runCmd(`git pull origin ${project.branch}`, dir);
     } catch {}
+    // 이전 작업에서 남은 claude/* 브랜치 정리
+    try {
+      const branches = await runCmd('git branch --list claude/*', dir);
+      if (branches) {
+        for (const b of branches.split('\n').map(s => s.trim()).filter(Boolean)) {
+          try { await runCmd(`git branch -D ${b}`, dir); } catch {}
+        }
+      }
+    } catch {}
   }
   return dir;
 }
@@ -382,14 +392,14 @@ ${diffContent.slice(0, 5000)}
 
   try {
     const msg = await runClaude(prompt, dir, { skipPrefix: true });
-    // ```commit 블록에서 추출
-    const commitBlockMatch = msg.match(/```commit\n([\s\S]+?)\n```/);
+    // ```commit 블록에서 추출 (닫는 ``` 뒤 줄바꿈 없는 경우도 매칭)
+    const commitBlockMatch = msg.match(/```commit\n([\s\S]+?)```/);
     if (commitBlockMatch) {
       const extracted = commitBlockMatch[1].trim();
       if (extracted) return extracted;
     }
     // 일반 ``` 블록에서 추출
-    const codeBlockMatch = msg.match(/```\n([\s\S]+?)\n```/);
+    const codeBlockMatch = msg.match(/```\n([\s\S]+?)```/);
     if (codeBlockMatch) {
       const extracted = codeBlockMatch[1].trim();
       if (extracted) return extracted;
@@ -397,8 +407,9 @@ ${diffContent.slice(0, 5000)}
     // Conventional Commits 패턴 직접 매칭
     const conventionalMatch = msg.match(/^(feat|fix|refactor|test|docs|chore|perf|style)(\(.+?\))?:\s*.+/m);
     if (conventionalMatch) return conventionalMatch[0].trim().slice(0, 72);
-    // 첫 줄 폴백 (따옴표, 백틱 제거)
-    const firstLine = msg.split('\n')[0].replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72);
+    // 첫 줄 폴백 (따옴표, 백틱, 에러 메시지 제거)
+    const lines = msg.split('\n').filter(l => !l.startsWith('bash:') && !l.startsWith('Warning'));
+    const firstLine = (lines[0] || '').replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 72);
     if (firstLine) return firstLine;
   } catch {}
   return 'feat: 자동 작업';
@@ -599,8 +610,7 @@ async function autoFix(dir, reviewText, channel, taskDescription, reviewHistory,
   const status = await runCmd('git status --porcelain', dir);
   if (status) {
     await runCmd('git add -A', dir);
-    const fixMsg = await generateCommitMsg(dir, `리뷰 피드백 반영 (${attempt}차 수정)`);
-    await gitCommit(fixMsg, dir);
+    await gitCommit(`refactor(review): attempt ${attempt}`, dir);
     await channel.send('✅ 수정 커밋 완료');
   }
 
@@ -611,6 +621,15 @@ async function autoFix(dir, reviewText, channel, taskDescription, reviewHistory,
 function extractIssueNumber(prompt) {
   const match = prompt.match(/(?:이슈|issue|#)\s*:?\s*#?(\d+)/i);
   return match ? match[1] : null;
+}
+
+// ─── 브랜치 정리 ───
+async function cleanupBranch(dir, branch, baseBranch) {
+  try { await runCmd(`git checkout -f ${baseBranch}`, dir); } catch {
+    try { await runCmd('git checkout --detach HEAD', dir); } catch {}
+  }
+  try { await runCmd(`git branch -D ${branch}`, dir); } catch {}
+  try { await runCmd(`git push origin --delete ${branch}`, dir); } catch {}
 }
 
 // ─── 공통 work 로직 ───
@@ -654,7 +673,7 @@ async function doWork(projectName, prompt, message) {
 
   if (!status) {
     await runCmd(`git checkout ${baseBranch}`, dir);
-    await runCmd(`git branch -d ${branch}`, dir);
+    try { await runCmd(`git branch -d ${branch}`, dir); } catch {}
     await message.channel.send('📋 코드 변경 없음');
     await sendChunks(message.channel, result.slice(0, 3800));
     return { changed: false };
@@ -691,6 +710,7 @@ async function doWork(projectName, prompt, message) {
 
   if (!reviewPassed) {
     await message.channel.send(`🚫 리뷰 ${MAX_REVIEW_RETRIES}회 실패 — 중단\n\`!fix ${projectName} 수정내용\`으로 수동 수정 가능`);
+    await cleanupBranch(dir, branch, baseBranch);
     return { changed: true, pushed: false };
   }
 
@@ -999,7 +1019,11 @@ client.on('messageCreate', async (message) => {
 
   } catch (err) {
     await message.reply(`❌ 에러: ${err.message.slice(0, 1500)}`);
-    try { await runCmd(`git checkout ${baseBranch}`, path.join(WORKSPACE, cmd.project)); } catch {}
+    try {
+      const errDir = path.join(WORKSPACE, cmd.project);
+      const cur = await runCmd('git branch --show-current', errDir);
+      if (cur.startsWith('claude/')) await cleanupBranch(errDir, cur, baseBranch);
+    } catch {}
   } finally {
     working = false;
   }
