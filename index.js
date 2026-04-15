@@ -8,6 +8,17 @@ const OpenAI = require('openai');
 // ─── 설정 ───
 const WORKSPACE = path.join(__dirname, 'repos');
 const MAX_REVIEW_RETRIES = 5;
+const OPENAI_MODEL = 'gpt-4.1-mini';
+
+// ─── OpenAI 텍스트 생성 공통 헬퍼 ───
+async function runOpenAIText(prompt) {
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const response = await openai.responses.create({
+    model: OPENAI_MODEL,
+    input: prompt,
+  });
+  return (response.output_text || '').trim();
+}
 const PROJECTS = {
   'blog-api': {
     repo: 'https://github.com/seeeeeeong/blog-api.git',
@@ -110,7 +121,11 @@ function runClaude(prompt, cwd, { skipPrefix = false } = {}) {
     let stdout = '';
     proc.stdout.on('data', (d) => (stdout += d));
     proc.stderr.on('data', () => {});
-    proc.on('close', (code) => {
+    proc.on('close', (code, signal) => {
+      if (signal) {
+        reject(new Error(`Claude CLI killed by signal ${signal}`));
+        return;
+      }
       const output = cleanOutput(stdout.trim());
       if (output) {
         resolve(output);
@@ -357,12 +372,12 @@ async function ensureRepo(name) {
       await runCmd(`git checkout ${project.branch}`, dir);
       await runCmd(`git pull origin ${project.branch}`, dir);
     } catch {}
-    // 이전 작업에서 남은 claude/* 브랜치 정리
+    // 이전 작업에서 남은 claude/* 브랜치 정리 (merge 완료된 것만 삭제)
     try {
       const branches = await runCmd('git branch --list claude/*', dir);
       if (branches) {
         for (const b of branches.split('\n').map(s => s.trim()).filter(Boolean)) {
-          try { await runCmd(`git branch -D ${b}`, dir); } catch {}
+          try { await runCmd(`git branch -d ${b}`, dir); } catch {}
         }
       }
     } catch {}
@@ -396,12 +411,7 @@ ${diffContent.slice(0, 5000)}
 커밋 메시지만 출력해. 따옴표, 백틱, 설명 없이 커밋 메시지 텍스트만.`;
 
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const response = await openai.responses.create({
-      model: 'gpt-4.1-mini',
-      input: prompt,
-    });
-    const msg = (response.output_text || '').trim();
+    const msg = await runOpenAIText(prompt);
     // Conventional Commits 패턴 직접 매칭
     const conventionalMatch = msg.match(/^(feat|fix|refactor|test|docs|chore|perf|style)(\(.+?\))?:\s*.+/m);
     if (conventionalMatch) return conventionalMatch[0].trim().slice(0, 72);
@@ -425,12 +435,8 @@ async function generateTitle(prompt, result) {
 작업 결과: ${(result || '').slice(0, 2000)}`;
 
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const response = await openai.responses.create({
-      model: 'gpt-4.1-mini',
-      input: genPrompt,
-    });
-    const cleaned = (response.output_text || '').split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
+    const result = await runOpenAIText(genPrompt);
+    const cleaned = result.split('\n')[0].replace(/^["'`]|["'`]$/g, '').trim().slice(0, 60);
     if (cleaned) return cleaned;
   } catch {}
   return prompt.slice(0, 60);
@@ -463,12 +469,7 @@ ${diffContent.slice(0, 8000)}
 {"summary": "...", "changes": ["index.js: 커밋 메시지 생성 로직 개선", ...]}`;
 
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const response = await openai.responses.create({
-      model: 'gpt-4.1-mini',
-      input: genPrompt,
-    });
-    const raw = (response.output_text || '').trim();
+    const raw = await runOpenAIText(genPrompt);
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
@@ -508,12 +509,7 @@ ${issueNumber ? `Closes #${issueNumber}` : '없음'}
 
   let draft;
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const response = await openai.responses.create({
-      model: 'gpt-4.1-mini',
-      input: draftPrompt,
-    });
-    draft = (response.output_text || '').trim();
+    draft = await runOpenAIText(draftPrompt);
   } catch {
     // 폴백: 기존 방식으로 생성
     const changesSection = Array.isArray(changeSummary.changes)
@@ -543,12 +539,7 @@ ${issueNumber ? `Closes #${issueNumber}` : '없음'}
 async function generateIssueBody(taskDescription, projectName, changeSummary, prUrl, dir) {
   try {
     const issuePrompt = buildIssueBodyPrompt(taskDescription, projectName);
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const issueResp = await openai.responses.create({
-      model: 'gpt-4.1-mini',
-      input: issuePrompt,
-    });
-    let body = (issueResp.output_text || '').trim();
+    let body = await runOpenAIText(issuePrompt);
 
     if (prUrl) {
       body += `\n\n## Related PR\n\n${prUrl}`;
@@ -837,12 +828,7 @@ async function parseNaturalLanguage(text) {
 메시지: ${text}`;
 
   try {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const nlResp = await openai.responses.create({
-      model: 'gpt-4.1-mini',
-      input: prompt,
-    });
-    const result = (nlResp.output_text || '').trim();
+    const result = await runOpenAIText(prompt);
     const jsonMatch = result.match(/\{[\s\S]*?\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch {}
@@ -967,12 +953,7 @@ client.on('messageCreate', async (message) => {
       await message.reply(`📝 **${cmd.project}** 이슈 본문 생성 중...`);
       let body;
       try {
-        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-        const issueResp = await openai.responses.create({
-          model: 'gpt-4.1-mini',
-          input: buildIssueBodyPrompt(description, cmd.project),
-        });
-        body = (issueResp.output_text || '').trim();
+        body = await runOpenAIText(buildIssueBodyPrompt(description, cmd.project));
       } catch {
         body = description;
       }
