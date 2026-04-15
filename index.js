@@ -644,9 +644,14 @@ async function cleanupBranch(dir, branch, baseBranch) {
 async function squashBranchCommits(dir, baseBranch, finalMessage) {
   const count = parseInt(await runCmd(`git rev-list --count ${baseBranch}..HEAD`, dir), 10);
   if (isNaN(count) || count <= 1) return;
+  const origHead = (await runCmd('git rev-parse HEAD', dir)).trim();
   await runCmd(`git reset --soft ${baseBranch}`, dir);
   const staged = await runCmd('git diff --cached --stat', dir);
-  if (staged) await gitCommit(finalMessage, dir);
+  if (staged) {
+    await gitCommit(finalMessage, dir);
+  } else {
+    await runCmd(`git reset --soft ${origHead}`, dir);
+  }
 }
 
 // ─── 공통 work 로직 ───
@@ -1040,7 +1045,7 @@ client.on('messageCreate', async (message) => {
     try {
       const errDir = path.join(WORKSPACE, cmd.project);
       const cur = await runCmd('git branch --show-current', errDir);
-      if (cur.startsWith('claude/')) await cleanupBranch(errDir, cur, baseBranch);
+      if (cur.startsWith('claude/')) await runSpawn('git', ['checkout', '-f', baseBranch], errDir);
     } catch {}
   } finally {
     working = false;
