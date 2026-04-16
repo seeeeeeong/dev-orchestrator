@@ -127,7 +127,8 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
     const proc = spawn('claude', args, {
       cwd,
       env: process.env,
-      timeout: 600000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 1800000,
     });
 
     let stdout = '';
