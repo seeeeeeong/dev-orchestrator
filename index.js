@@ -128,16 +128,25 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
       cwd,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 1800000,
     });
+
+    let settled = false;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, 1800000);
 
     let stdout = '';
     proc.stdout.on('data', (d) => (stdout += d));
     let stderr = '';
     proc.stderr.on('data', (d) => (stderr += d));
     proc.on('close', (code, signal) => {
-      if (signal) {
-        reject(new Error(`Claude CLI killed by signal ${signal}`));
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      if (signal || code === 143) {
+        reject(new Error(`Claude CLI killed by signal ${signal || 'SIGTERM'}${timedOut ? ' (timeout)' : ''}`));
         return;
       }
       const cleaned = cleanOutput(stdout.trim());
@@ -162,7 +171,10 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
         }
       }
     });
-    proc.on('error', reject);
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      if (!settled) { settled = true; reject(err); }
+    });
   });
 }
 
@@ -220,6 +232,11 @@ function parseWorkOutput(text, fallbackPrompt) {
 
 function buildPlanPrompt(taskDescription, issueNumber, projectInfo) {
   return `
+## Scope Constraints
+- Do not read the entire repository. Only inspect files relevant to the task.
+- Limit inspection to at most 10 files. If the task appears to require more, prioritize by relevance.
+- Skip generated and dependency directories: node_modules, dist, build, .git, .next, out, coverage.
+
 # Build an Implementation Plan
 
 ## Task
