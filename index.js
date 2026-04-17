@@ -9,10 +9,15 @@ const OpenAI = require('openai');
 const WORKSPACE = path.join(__dirname, 'repos');
 const MAX_REVIEW_RETRIES = 3;
 const OPENAI_MODEL = 'gpt-4.1-mini';
+const GPT_REVIEW_MODEL = 'gpt-5.4';
+const CLAUDE_MODEL = 'claude-opus-4-6';
+const CLAUDE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_STDOUT_BUFFER = 10 * 1024 * 1024; // 10MB
 
-// ─── Shared OpenAI text helper ───
+// ─── Shared OpenAI client (singleton) ───
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 async function runOpenAIText(prompt) {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const response = await openai.responses.create({
     model: OPENAI_MODEL,
     input: prompt,
@@ -72,8 +77,12 @@ function runCmd(cmd, cwd) {
   return new Promise((resolve, reject) => {
     const proc = spawn('bash', ['-c', cmd], { cwd, env: process.env });
     let stdout = '', stderr = '';
-    proc.stdout.on('data', (d) => (stdout += d));
-    proc.stderr.on('data', (d) => (stderr += d));
+    proc.stdout.on('data', (d) => {
+      if (stdout.length < MAX_STDOUT_BUFFER) stdout += d;
+    });
+    proc.stderr.on('data', (d) => {
+      if (stderr.length < MAX_STDOUT_BUFFER) stderr += d;
+    });
     proc.on('close', (code) =>
       code === 0 ? resolve(stdout.trim()) : reject(new Error(stderr || stdout))
     );
@@ -85,8 +94,12 @@ function runSpawn(cmd, args, cwd) {
     const proc = spawn(cmd, args, { cwd, env: process.env });
     let stdout = '', stderr = '';
     let settled = false;
-    proc.stdout.on('data', (d) => (stdout += d));
-    proc.stderr.on('data', (d) => (stderr += d));
+    proc.stdout.on('data', (d) => {
+      if (stdout.length < MAX_STDOUT_BUFFER) stdout += d;
+    });
+    proc.stderr.on('data', (d) => {
+      if (stderr.length < MAX_STDOUT_BUFFER) stderr += d;
+    });
     proc.on('error', (err) => {
       if (!settled) { settled = true; reject(err); }
     });
@@ -120,7 +133,7 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
       '-p', prompt,
       '--output-format', 'json',
       '--dangerously-skip-permissions',
-      '--model', 'claude-opus-4-6',
+      '--model', CLAUDE_MODEL,
     ];
     if (sessionId) args.push('--resume', sessionId);
 
@@ -135,7 +148,7 @@ function runClaude(prompt, cwd, { sessionId = null } = {}) {
     const timer = setTimeout(() => {
       timedOut = true;
       proc.kill();
-    }, 1800000);
+    }, CLAUDE_TIMEOUT_MS);
 
     let stdout = '';
     proc.stdout.on('data', (d) => (stdout += d));
@@ -223,7 +236,7 @@ function parseWorkOutput(text, fallbackPrompt) {
     if (rawMatch) {
       return { ...defaults, ...JSON.parse(rawMatch[0]) };
     }
-  } catch {}
+  } catch (e) { console.warn('[parseWorkOutput] JSON parse warning:', e.message); }
 
   return defaults;
 }
@@ -231,12 +244,19 @@ function parseWorkOutput(text, fallbackPrompt) {
 // ─── Prompt builders ───
 
 function buildPlanPrompt(taskDescription, issueNumber, projectInfo) {
+  const conventionsSection = projectInfo.conventions
+    ? `\n## Project Conventions (from CLAUDE.md)\n${projectInfo.conventions}\n`
+    : '';
+  const fileTreeSection = projectInfo.fileTree
+    ? `\n## Repository Structure\n\`\`\`\n${projectInfo.fileTree}\n\`\`\`\n`
+    : '';
+
   return `
 ## Scope Constraints
 - Do not read the entire repository. Only inspect files relevant to the task.
 - Limit inspection to at most 10 files. If the task appears to require more, prioritize by relevance.
 - Skip generated and dependency directories: node_modules, dist, build, .git, .next, out, coverage.
-
+${conventionsSection}${fileTreeSection}
 # Build an Implementation Plan
 
 ## Task
@@ -246,6 +266,7 @@ ${issueNumber ? `\n## Issue: #${issueNumber}` : ''}
 ## Instructions
 - Do not edit code yet. Produce a plan only.
 - Inspect the relevant directory structure and existing code first.
+- Follow existing project conventions strictly.
 - Cover the items below:
 
 1. **Target files** - Files to modify or create, and why
@@ -303,8 +324,46 @@ ${question}
   `.trim();
 }
 
-function buildGPTReviewPrompt(diff, claudeMd, taskDescription) {
-  return `You are a senior engineer and code reviewer. Review the provided git diff.
+const REVIEW_PERSPECTIVES = {
+  correctness: {
+    role: 'correctness reviewer',
+    focus: `Focus exclusively on:
+- Logic bugs, off-by-one errors, race conditions
+- Incorrect error handling or missing edge cases
+- Wrong return types, null/undefined dereferences
+- Broken control flow or unreachable code
+Do NOT comment on style, naming, or performance.`,
+  },
+  security: {
+    role: 'security reviewer',
+    focus: `Focus exclusively on:
+- Command injection, XSS, SQL injection
+- Authentication/authorization bypass
+- Sensitive data exposure (tokens, keys, PII in logs)
+- Insecure file operations, path traversal
+- SSRF, open redirects, unsafe deserialization
+Do NOT comment on style, naming, or general logic.`,
+  },
+  performance: {
+    role: 'performance reviewer',
+    focus: `Focus exclusively on:
+- N+1 queries, unbounded loops, missing pagination
+- Memory leaks, unbounded buffer growth
+- Blocking I/O in async paths, missing concurrency limits
+- Unnecessary re-computation or redundant API calls
+Do NOT comment on style, naming, or general logic.`,
+  },
+};
+
+function buildGPTReviewPrompt(diff, claudeMd, taskDescription, perspective = null) {
+  const perspectiveInfo = perspective ? REVIEW_PERSPECTIVES[perspective] : null;
+  const roleDesc = perspectiveInfo
+    ? `You are a senior ${perspectiveInfo.role}. ${perspectiveInfo.focus}`
+    : 'You are a senior engineer and code reviewer.';
+
+  return `${roleDesc}
+
+Review the provided git diff.
 
 ${claudeMd ? `## Project Conventions\n${claudeMd}\n` : ''}
 
@@ -323,7 +382,7 @@ ${taskDescription || '(not specified)'}
 
 ## Output Format
 ### Summary
-One-line overall assessment
+One-line overall assessment${perspective ? ` (${perspective} perspective)` : ''}
 
 ### Changed Files
 List changed files and briefly summarize what changed in each
@@ -414,10 +473,10 @@ async function ensureRepo(name) {
     // Clean up a dirty worktree, then return to the base branch.
     try {
       await runCmd('git reset HEAD -- . 2>/dev/null; git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null', dir);
-    } catch {}
+    } catch (e) { console.warn(`[ensureRepo] cleanup warning for ${name}:`, e.message); }
     try {
       await runCmd(`git checkout ${project.branch}`, dir);
-    } catch {}
+    } catch (e) { console.warn(`[ensureRepo] checkout warning for ${name}:`, e.message); }
     // Re-clone if pull fails, for example when the repo is unrecoverably conflicted.
     try {
       await runCmd(`git pull origin ${project.branch}`, dir);
@@ -430,10 +489,10 @@ async function ensureRepo(name) {
       const branches = await runCmd('git branch --list claude/*', dir);
       if (branches) {
         for (const b of branches.split('\n').map(s => s.replace(/^\*\s*/, '').trim()).filter(Boolean)) {
-          try { await runSpawn('git', ['branch', '-d', b], dir); } catch {}
+          try { await runSpawn('git', ['branch', '-d', b], dir); } catch (e) { console.warn(`[ensureRepo] branch cleanup warning: ${b}`, e.message); }
         }
       }
-    } catch {}
+    } catch (e) { console.warn(`[ensureRepo] branch list warning for ${name}:`, e.message); }
   }
   return dir;
 }
@@ -486,18 +545,40 @@ async function generateIssueBody(taskDescription, projectName, changeSummary, pr
 }
 
 // ─── GPT-5.4 review (keep cross-model review) ───
-async function reviewWithGPT(diff, claudeMd, taskDescription) {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const systemPrompt = buildGPTReviewPrompt(diff, claudeMd, taskDescription);
+async function reviewWithGPT(diff, claudeMd, taskDescription, perspective = null) {
+  const systemPrompt = buildGPTReviewPrompt(diff, claudeMd, taskDescription, perspective);
 
   const response = await openai.responses.create({
-    model: 'gpt-5.4',
+    model: GPT_REVIEW_MODEL,
     instructions: systemPrompt,
     input: `Review the following code changes:\n\n\`\`\`diff\n${diff.slice(0, 80000)}\n\`\`\``,
     reasoning: { effort: 'high' },
   });
 
   return response.output_text;
+}
+
+// ─── Deterministic quality gates (lint, typecheck, test) ───
+async function runQualityGates(dir, channel) {
+  const gates = [
+    { name: 'lint', cmd: 'npm run lint --if-present 2>&1' },
+    { name: 'typecheck', cmd: 'npx tsc --noEmit 2>&1' },
+    { name: 'test', cmd: 'npm test --if-present 2>&1' },
+  ];
+  const failures = [];
+
+  for (const gate of gates) {
+    try {
+      await runCmd(gate.cmd, dir);
+      await channel.send(`✅ ${gate.name} 통과`);
+    } catch (e) {
+      const errorSnippet = e.message.slice(0, 500);
+      failures.push({ name: gate.name, error: errorSnippet });
+      await channel.send(`❌ ${gate.name} 실패: \`\`\`\n${errorSnippet}\n\`\`\``);
+    }
+  }
+
+  return failures;
 }
 
 // ─── Review helpers ───
@@ -511,7 +592,7 @@ function isLGTM(review) {
 }
 
 async function reviewCode(dir, branch, baseBranch, channel, taskDescription) {
-  await channel.send('🔍 GPT-5.4 (high reasoning) 리뷰 시작...');
+  await channel.send('🔍 GPT-5.4 멀티 관점 리뷰 시작 (correctness / security / performance)...');
 
   const diff = await runCmd(`git diff ${baseBranch}...${branch}`, dir);
   if (!diff) {
@@ -526,9 +607,29 @@ async function reviewCode(dir, branch, baseBranch, channel, taskDescription) {
     claudeMd = fs.readFileSync(claudeMdPath, 'utf-8');
   }
 
-  const review = await reviewWithGPT(diff, claudeMd, taskDescription);
-  const passed = isLGTM(review);
-  return { review, passed };
+  // Run three perspective reviews in parallel.
+  const perspectives = ['correctness', 'security', 'performance'];
+  const results = await Promise.allSettled(
+    perspectives.map(p => reviewWithGPT(diff, claudeMd, taskDescription, p))
+  );
+
+  const reviews = [];
+  let allPassed = true;
+
+  for (let i = 0; i < perspectives.length; i++) {
+    const label = perspectives[i].toUpperCase();
+    if (results[i].status === 'fulfilled') {
+      const text = results[i].value;
+      reviews.push(`## [${label}]\n${text}`);
+      if (!isLGTM(text)) allPassed = false;
+    } else {
+      reviews.push(`## [${label}]\n⚠️ 리뷰 실패: ${results[i].reason?.message || 'unknown error'}`);
+      console.warn(`[reviewCode] ${label} review failed:`, results[i].reason);
+    }
+  }
+
+  const combinedReview = reviews.join('\n\n---\n\n');
+  return { review: combinedReview, passed: allPassed };
 }
 
 async function autoFix(dir, reviewText, channel, attempt, sessionId) {
@@ -553,15 +654,6 @@ function extractIssueNumber(prompt) {
   return match ? match[1] : null;
 }
 
-// ─── Branch cleanup ───
-async function cleanupBranch(dir, branch, baseBranch) {
-  try { await runSpawn('git', ['checkout', '-f', baseBranch], dir); } catch {
-    try { await runSpawn('git', ['checkout', '--detach', 'HEAD'], dir); } catch {}
-  }
-  try { await runSpawn('git', ['branch', '-D', branch], dir); } catch {}
-  try { await runSpawn('git', ['push', 'origin', '--delete', branch], dir); } catch {}
-}
-
 async function squashBranchCommits(dir, baseBranch, finalMessage) {
   const count = parseInt(await runCmd(`git rev-list --count ${baseBranch}..HEAD`, dir), 10);
   if (isNaN(count) || count <= 1) return;
@@ -577,7 +669,7 @@ async function squashBranchCommits(dir, baseBranch, finalMessage) {
     }
     await gitCommit(finalMessage, dir);
   } catch (e) {
-    try { await runCmd(`git reset --soft ${origHead}`, dir); } catch {}
+    try { await runCmd(`git reset --soft ${origHead}`, dir); } catch (e2) { console.warn('[squashBranchCommits] reset recovery warning:', e2.message); }
     throw e;
   }
 }
@@ -616,11 +708,30 @@ async function doWork(projectName, prompt, message) {
     }
   }
 
+  // ── Pre-phase: collect project context ──
+  let conventions = '';
+  const claudeMdPath = path.join(dir, 'CLAUDE.md');
+  if (fs.existsSync(claudeMdPath)) {
+    conventions = fs.readFileSync(claudeMdPath, 'utf-8');
+  }
+
+  let fileTree = '';
+  try {
+    fileTree = await runCmd(
+      'find . -type f \\( -name "*.js" -o -name "*.ts" -o -name "*.tsx" -o -name "*.jsx" -o -name "*.json" -o -name "*.py" -o -name "*.java" -o -name "*.go" \\) ' +
+      '-not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/build/*" -not -path "*/.next/*" -not -path "*/out/*" -not -path "*/coverage/*" ' +
+      '| head -100 | sort',
+      dir,
+    );
+  } catch (e) { console.warn('[doWork] file tree collection warning:', e.message); }
+
+  const projectContext = { name: projectName, path: dir, conventions, fileTree };
+
   // ── Phase 1: planning ──
   let planSessionId = null;
   if (!isCustomCommand) {
     await message.channel.send('📋 작업 계획 수립 중...');
-    const planPrompt = buildPlanPrompt(prompt, issueNumber, { name: projectName, path: dir });
+    const planPrompt = buildPlanPrompt(prompt, issueNumber, projectContext);
     const planResult = await runClaude(planPrompt, dir);
     planSessionId = planResult.sessionId;
     // Share the plan in Discord.
@@ -639,7 +750,7 @@ async function doWork(projectName, prompt, message) {
     } catch (resumeErr) {
       // Fall back to a new session if `--resume` fails.
       await message.channel.send('⚠️ 세션 이어받기 실패, 새 세션으로 재시도...');
-      const fullPrompt = buildPlanPrompt(prompt, issueNumber, { name: projectName, path: dir }) + '\n\n' + execPrompt;
+      const fullPrompt = buildPlanPrompt(prompt, issueNumber, projectContext) + '\n\n' + execPrompt;
       execResult = await runClaude(fullPrompt, dir);
     }
   }
@@ -649,7 +760,7 @@ async function doWork(projectName, prompt, message) {
 
   if (!status) {
     await runCmd(`git checkout ${baseBranch}`, dir);
-    try { await runCmd(`git branch -d ${branch}`, dir); } catch {}
+    try { await runCmd(`git branch -d ${branch}`, dir); } catch (e) { console.warn('[doWork] branch cleanup:', e.message); }
     await message.channel.send('📋 코드 변경 없음');
     await sendChunks(message.channel, execResult.text.slice(0, 3800));
     return { changed: false };
@@ -659,10 +770,36 @@ async function doWork(projectName, prompt, message) {
   const workOutput = parseWorkOutput(execResult.text, prompt);
 
   // Commit using the message generated by Claude.
-  await runCmd('git add -A', dir);
+  await runCmd('git add -A -- . ":!.env" ":!.env.*" ":!*.tmp" ":!*.log"', dir);
   await gitCommit(workOutput.commit_message, dir);
 
-  // ── Phase 3: GPT-5.4 review (cross-model) ──
+  // ── Phase 2.5: deterministic quality gates ──
+  await message.channel.send('🔧 품질 게이트 실행 중 (lint, typecheck, test)...');
+  const gateFailures = await runQualityGates(dir, message.channel);
+
+  if (gateFailures.length > 0) {
+    await message.channel.send('⚠️ 품질 게이트 실패 → Claude 자동 수정 시도...');
+    const gateFixPrompt = `
+The following quality checks failed. Fix all issues, then verify the checks pass.
+
+${gateFailures.map(f => `### ${f.name}\n\`\`\`\n${f.error}\n\`\`\``).join('\n\n')}
+
+Fix only the reported issues. Do not touch unrelated code.`.trim();
+
+    try {
+      await runClaude(gateFixPrompt, dir, { sessionId: workSessionId });
+      const fixStatus = await runCmd('git status --porcelain', dir);
+      if (fixStatus) {
+        await runCmd('git add -A -- . ":!.env" ":!.env.*" ":!*.tmp" ":!*.log"', dir);
+        await gitCommit('fix: address quality gate failures', dir);
+        await message.channel.send('✅ 품질 게이트 수정 커밋 완료');
+      }
+    } catch (e) {
+      await message.channel.send(`⚠️ 품질 게이트 자동 수정 실패: ${e.message.slice(0, 300)}`);
+    }
+  }
+
+  // ── Phase 3: GPT-5.4 multi-perspective review (cross-model) ──
   let reviewPassed = false;
   let lastReview = null;
   const reviewHistory = [];
@@ -745,7 +882,7 @@ async function doWork(projectName, prompt, message) {
   // Return to the base branch after the work completes.
   try {
     await runCmd(`git checkout ${baseBranch}`, dir);
-  } catch {}
+  } catch (e) { console.warn('[doWork] checkout base branch warning:', e.message); }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
   await message.channel.send(`✅ 완료! (${elapsed}초)`);
@@ -807,7 +944,7 @@ Message: ${text}`;
     const result = await runOpenAIText(prompt);
     const jsonMatch = result.match(/\{[\s\S]*?\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
-  } catch {}
+  } catch (e) { console.warn('[parseNaturalLanguage] parse warning:', e.message); }
   return null;
 }
 
@@ -896,7 +1033,7 @@ client.on('messageCreate', async (message) => {
           await doWork(projectName, cmd.prompt, message);
         } catch (err) {
           await message.channel.send(`❌ **${projectName}** 에러: ${err.message.slice(0, 500)}`);
-          try { await runCmd(`git checkout ${PROJECTS[projectName].branch}`, path.join(WORKSPACE, projectName)); } catch {}
+          try { await runCmd(`git checkout ${PROJECTS[projectName].branch}`, path.join(WORKSPACE, projectName)); } catch (e2) { console.warn('[multi-work] checkout recovery:', e2.message); }
         }
       }
       await message.channel.send('🏁 멀티 프로젝트 전체 완료!');
@@ -1020,11 +1157,21 @@ ${cmd.prompt}
       const errDir = path.join(WORKSPACE, cmd.project);
       const cur = await runCmd('git branch --show-current', errDir);
       if (cur.startsWith('claude/') && baseBranch) await runSpawn('git', ['checkout', '-f', baseBranch], errDir);
-    } catch {}
+    } catch (e2) { console.warn('[messageCreate] error recovery:', e2.message); }
   } finally {
     setWorking(false);
   }
 });
+
+// ─── Graceful shutdown ───
+function shutdown(signal) {
+  console.log(`\n${signal} received — shutting down...`);
+  setWorking(false);
+  client.destroy();
+  process.exit(0);
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 // ─── Startup ───
 client.once('ready', () => {
